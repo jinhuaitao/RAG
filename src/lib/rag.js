@@ -3,8 +3,8 @@ import { vectorize } from "./cfapi.js";
 import { chunkId } from "./store.js";
 
 const EMBED_BATCH = 16;
-// Vectorize 单次写入上限 1000 条，留足余量避免整批失败
-const UPSERT_BATCH = 200;
+// Vectorize 单次写入上限 1000 条，但请求体本身也要留余量：1024 维一条约 11KB，50 条 ≈ 550KB
+const UPSERT_BATCH = 50;
 
 export async function embed(env, texts) {
   if (!env.AI) {

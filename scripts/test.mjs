@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chunkText, extractText, normalizeText } from "../src/lib/chunk.js";
+import { encodeVector } from "../src/lib/cfapi.js";
 
 const cases = [];
 function test(name, fn) {
@@ -42,6 +43,29 @@ test("HTML 抽取正文并丢弃脚本样式", () => {
   assert.ok(text.includes("正文内容"));
   assert.ok(!text.includes("alert"));
   assert.ok(!text.includes("color:red"));
+});
+
+test("向量压到 6 位小数并保持维度", () => {
+  const raw = Array.from({ length: 1024 }, (_, i) => Math.sin(i) / 3);
+  const out = encodeVector(raw);
+  assert.equal(out.length, 1024);
+  assert.equal(out[1], Number((Math.sin(1) / 3).toFixed(6)));
+  assert.ok(out.every((value) => typeof value === "number"));
+});
+
+test("TypedArray 与含 NaN 的向量按边界处理", () => {
+  assert.deepEqual(encodeVector(new Float32Array([0.1, -0.25, 1 / 3])), [0.1, -0.25, 0.333333]);
+  assert.throws(() => encodeVector([0.1, NaN]), /不是有限数字/);
+  assert.throws(() => encodeVector([]), /空向量/);
+});
+
+test("1024 维 query 请求体体积可控且是合法 JSON", () => {
+  const raw = Array.from({ length: 1024 }, (_, i) => (Math.sin(i * 12.9898) * 43758.5453) % 1);
+  const full = JSON.stringify({ vector: raw, topK: 6, returnMetadata: false });
+  const compact = JSON.stringify({ topK: 6, vector: encodeVector(raw) });
+  assert.deepEqual(JSON.parse(compact).vector[0], encodeVector(raw)[0]);
+  assert.ok(compact.length < full.length, "压缩后应更小");
+  assert.ok(compact.length < 12_000, `请求体应远小于出问题时的 19478 字节，实际 ${compact.length}`);
 });
 
 let failed = 0;

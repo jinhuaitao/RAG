@@ -5,6 +5,23 @@ import { HttpError } from "./http.js";
 
 const DEFAULT_BASE = "https://api.cloudflare.com/client/v4";
 
+// 1024 维 f32 向量按完整精度序列化约 19KB/条，实测 Vectorize 的 query 端点会在解析到请求体
+// 末尾时报「Failed to parse the request body as JSON」——即服务端收到的字节数比 Worker 发出的少。
+// 压到 6 位小数：cosine 检索精度不受影响（索引本身按 f32 存），体积减半，且可选字段不再排在尾部。
+const VECTOR_DECIMALS = 6;
+
+export function encodeVector(values) {
+  const list = Array.isArray(values) ? values : Array.from(values ?? []);
+  if (!list.length) throw new HttpError(502, "嵌入模型返回了空向量，无法写入或检索");
+  const out = new Array(list.length);
+  for (let i = 0; i < list.length; i += 1) {
+    const value = Number(list[i]);
+    if (!Number.isFinite(value)) throw new HttpError(502, `嵌入向量第 ${i} 维不是有限数字（${list[i]}），请更换 EMBEDDING_MODEL`);
+    out[i] = Number(value.toFixed(VECTOR_DECIMALS));
+  }
+  return out;
+}
+
 export function credentials(env) {
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || env.ACCOUNT_ID;
   const token = env.CLOUDFLARE_API_TOKEN;
@@ -49,7 +66,9 @@ async function call(env, path, { method = "GET", body, headers = {} } = {}) {
   if (!response.ok || payload?.success === false) {
     const first = payload?.errors?.[0];
     const detail = first?.message || text.slice(0, 300) || response.statusText;
-    const error = new HttpError(response.status >= 500 ? 502 : response.status, `Cloudflare API ${method} ${path} 失败：${detail}`);
+    const sent = body === undefined ? 0 : new TextEncoder().encode(String(body)).length;
+    const size = sent ? `（请求体 ${sent} 字节）` : "";
+    const error = new HttpError(response.status >= 500 ? 502 : response.status, `Cloudflare API ${method} ${path} 失败：${detail}${size}`);
     error.apiCode = first?.code;
     throw error;
   }
@@ -110,7 +129,9 @@ export const vectorize = {
   },
 
   async upsert(env, name, items) {
-    const body = items.map((item) => JSON.stringify(item)).join("\n");
+    const body = items
+      .map((item) => JSON.stringify({ ...item, values: encodeVector(item.values) }))
+      .join("\n");
     return call(env, `/accounts/{account_id}/vectorize/v2/indexes/${encodeURIComponent(name)}/upsert`, {
       method: "POST",
       headers: { "content-type": "application/x-ndjson" },
@@ -119,10 +140,13 @@ export const vectorize = {
   },
 
   async query(env, name, vector, { topK, returnMetadata = false } = {}) {
+    // topK 排在前面：向量数组占绝大部分体积，可选字段一律不放在末尾
+    const payload = { topK, vector: encodeVector(vector) };
+    if (returnMetadata) payload.returnMetadata = true;
     return call(env, `/accounts/{account_id}/vectorize/v2/indexes/${encodeURIComponent(name)}/query`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ vector, topK, returnMetadata }),
+      body: JSON.stringify(payload),
     });
   },
 

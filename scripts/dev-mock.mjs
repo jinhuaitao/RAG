@@ -128,8 +128,20 @@ async function handleApi(req, res) {
   }
 
   if (action === "query") {
-    const { vector, topK } = JSON.parse(body || "{}");
+    let payload;
+    try {
+      payload = JSON.parse(body || "");
+    } catch (error) {
+      return badRequest(`Failed to parse the request body as JSON: ${error.message}`);
+    }
+    const { vector, topK } = payload;
     if (!Array.isArray(vector)) return badRequest("query 需要 vector 数组");
+    if (vector.length !== index.config.dimensions) {
+      return badRequest(`dimension mismatch ${vector.length} != ${index.config.dimensions}`);
+    }
+    if (vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+      return badRequest("vector 含非数字值");
+    }
     const scored = [...index.vectors].map(([id, item]) => {
       let dot = 0;
       for (let i = 0; i < vector.length; i += 1) dot += vector[i] * item.values[i];
