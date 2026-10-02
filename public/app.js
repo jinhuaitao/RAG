@@ -102,9 +102,9 @@ function renderSources(target, sources) {
     title.textContent = source.title;
     const score = document.createElement("span");
     score.className = "muted";
-    const chunks = source.chunks ? `片段 ${source.chunks.join("、")}` : `第 ${Number(source.ordinal) + 1} 段`;
-    const lexical = typeof source.lexical === "number" ? ` · 关键词命中 ${Math.round(source.lexical * 100)}%` : "";
-    score.textContent = `相似度 ${source.score}${lexical} · ${chunks}`;
+    const chunks = `片段 ${source.chunks.join("、")}`;
+    const lexical = ` · 关键词命中 ${Math.round(source.lexical * 100)}%`;
+    score.textContent = `综合 ${source.score.toFixed(3)} · 语义 ${source.vector.toFixed(2)}${lexical} · ${chunks}`;
     head.append(num, title, score);
 
     const excerpt = document.createElement("div");

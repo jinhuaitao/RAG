@@ -54,7 +54,9 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
   }
   const maxChars = Number(env.MAX_CONTEXT_CHARS) || 12_000;
   const { blocks, text } = buildContext(groupByDocument(passages), maxChars);
-  const focus = terms.length ? `\n【重点词】${terms.map((entry) => entry.term).join("、")}` : "";
+  // 重点词只给稀有词（短语与数字），全量双字会让模型把「工作」「提交」当成答题线索
+  const rare = terms.filter((entry) => entry.weight >= 4).slice(0, 8);
+  const focus = rare.length ? `\n【重点词】${rare.map((entry) => entry.term).join("、")}` : "";
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `【参考资料】\n${text}\n\n【问题】\n${question}${focus}` },
@@ -87,5 +89,15 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
   if (typeof answer !== "string") {
     throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 返回格式异常`, { raw: JSON.stringify(response).slice(0, 400) });
   }
-  return { answer, used: passages.map((p, i) => ({ index: i + 1, title: p.title, docId: p.docId, score: p.score, ordinal: p.ordinal })) };
+  const used = blocks.map((group, index) => ({
+    index: index + 1,
+    docId: group[0].docId,
+    title: group[0].title,
+    chunks: group.map((p) => p.ordinal + 1),
+    score: group[0].score,
+    vector: Math.max(...group.map((p) => p.vector)),
+    lexical: Math.max(...group.map((p) => p.lexical)),
+    excerpt: group.map((p) => p.content).join("\n").slice(0, 300),
+  }));
+  return { answer, used };
 }
