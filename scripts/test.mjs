@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib/chunk.js";
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
@@ -218,14 +219,18 @@ test("网址抓取：非 HTML 文本按原样保留", () => {
   assert.equal(htmlToText("纯文本，没有标签。"), "纯文本，没有标签。");
 });
 
-test("检索：中文按双字取词，长词权重更高，英文与数字单独成词", () => {
+test("检索：中文按三层取词，长词权重更高，英文与数字单独成词", () => {
   const terms = extractTerms("退货申请需要在几天内提交？refund 要 3-5 工作日");
   const byTerm = new Map(terms.map((entry) => [entry.term, entry.weight]));
-  assert.ok(byTerm.has("退货") && byTerm.has("申请"), [...byTerm.keys()].join(","));
+  assert.ok(byTerm.has("退货") && byTerm.has("申请") && byTerm.has("退货申请"), [...byTerm.keys()].join(","));
   assert.ok(byTerm.get("退货申请") > byTerm.get("退货"), "长词权重应更高");
-  assert.equal(byTerm.get("refund"), 2);
-  assert.ok(byTerm.has("3-5") || byTerm.has("3"), "数字要参与检索");
+  assert.equal(byTerm.get("refund"), 4);
+  assert.ok(byTerm.has("3-5"), "数字要参与检索");
   assert.ok(![...byTerm.keys()].some((term) => term.includes("？")), "标点不进检索词");
+  // 虚词不能把真词切坏
+  assert.ok(extractTerms("合同要求是什么").some((entry) => entry.term === "合同要求"), "要求不能被切开");
+  assert.ok(extractTerms("委员会的会签流程").some((entry) => entry.term === "委员会"), "委员会不能被切开");
+  assert.ok(extractTerms("申请需要哪些材料").some((entry) => entry.term === "申请"), "申请不能被切开");
 });
 
 test("检索：关键词覆盖率区分「踩中原文」与「只是话题相近」", () => {
@@ -243,6 +248,26 @@ test("检索：LIKE 模式转义通配符，查询只走占位符", () => {
   assert.ok(params.every((p) => p.startsWith("%") && p.endsWith("%")));
   assert.ok(!params.some((p) => p.includes("'") || p.includes(";")), params.join("|"));
   assert.ok(sql.includes("ESCAPE '\\'") && sql.includes("LIMIT 24"), sql);
+});
+
+test("检索：关键词 SQL 在真实 SQLite 上能执行，无关片段不召回", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE chunks (id TEXT PRIMARY KEY, doc_id TEXT, ordinal INTEGER, content TEXT, char_count INTEGER DEFAULT 0)");
+  const insert = db.prepare("INSERT INTO chunks (id, doc_id, ordinal, content) VALUES (?, ?, ?, ?)");
+  insert.run("b-1", "b", 1, "红字确认单跨月需要在系统里作废后重新开票，作废申请提交后 3 个工作日内处理完成。扩展说明：作废需要原始发票号与税务登记号，两者缺一即退回申请。");
+  insert.run("a-1", "a", 1, "跨月的红字确认单需先作废。");
+  insert.run("c-1", "c", 1, "团建预算人均 300 元，不支持折现。");
+  const { sql, params } = keywordSql(extractTerms("跨月的红字确认单要怎么处理才能正常开票"), 24);
+  const rows = db.prepare(sql).all(...params);
+  assert.deepEqual(new Set(rows.map((row) => row.id)), new Set(["a-1", "b-1"]), `只该召回相关片段：${JSON.stringify(rows)}`);
+
+  // 命中数相同时，短片段信息密度高，排在前面
+  const tie = keywordSql([{ term: "红字", weight: 5 }], 24);
+  insert.run("s-1", "s", 1, "跨月红字确认单作废。");
+  insert.run("s-2", "s", 2, "跨月红字确认单作废，具体由税务岗在系统里操作，节假日顺延处理。");
+  const ids = db.prepare(tie.sql).all(...tie.params).map((row) => row.id);
+  assert.ok(ids.indexOf("s-1") > -1 && ids.indexOf("s-1") < ids.indexOf("s-2"), `命中数相同时短片段在前：${ids.join(",")}`);
+  db.close();
 });
 
 test("检索：向量与关键词合并重排，弱相关片段被挡在门外", () => {
