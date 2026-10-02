@@ -3,8 +3,9 @@ import { HttpError } from "./http.js";
 // 检索用的词法信号：纯本地规则，不调模型，用来补上向量召回最容易漏掉的专有名词、数字与日期。
 // 提问里的疑问词、助词和客套话几乎不会出现在文档里，先把它们当分隔符，
 // 剩下的连续中文才当成「短语」去关键词召回
+// 「请」不能当分隔符，它会从问题里切出「退货申」这种半个词，让申请、请求整类词失效
 const FILLER =
-  /请问|请教|想问|一下|是不是|是否|哪些|哪个|哪种|什么|怎么|怎样|如何|多少|几点|几天|需要|可以|能不能|应该|必须|我们|你们|他们|公司|的|了|吗|呢|吧|啊|呀|是|在|要|会|和|请/g;
+  /请问|请教|想问|一下|是不是|是否|哪些|哪个|哪种|什么|怎么办|怎么|怎样|如何|多少|几点|几天|需要|可以|能不能|应该|必须|我们|你们|他们|公司|的|了|吗|呢|吧|啊|呀|是|在|要|会|和/g;
 const LATIN_TOKEN = /[A-Za-z][A-Za-z0-9_.+-]+|\d+(?:[.,\-–~至]\d+)*/g;
 const CJK = /[㐀-䶿一-鿿぀-ヿ]+/g;
 
@@ -22,9 +23,15 @@ export function extractTerms(text, limit = 60) {
   for (const match of source.match(LATIN_TOKEN) ?? []) push(match, 2);
   for (const run of source.match(CJK) ?? []) {
     if (run.length <= 8) push(run, 5);
+    // 超过八个字的连读里必然夹着虚词，整段拿去 LIKE 匹配不上，改用四字窗口定位专有名词
+    if (run.length > 8) for (let i = 0; i + 4 <= run.length; i += 1) push(run.slice(i, i + 4), 3);
     for (let i = 0; i + 2 <= run.length; i += 1) push(run.slice(i, i + 2), 1);
   }
-  return [...terms.entries()].slice(0, limit).map(([term, weight]) => ({ term, weight }));
+  // 稀有词优先：截断时宁可丢掉双字，也不能把短语切没
+  return [...terms.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([term, weight]) => ({ term, weight }));
 }
 
 // 只拿短语和英文数字去做 LIKE 全表扫描：双字太常见，拿去扫库会把一堆无关片段捞进来

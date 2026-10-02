@@ -4,7 +4,7 @@ import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
-import { combinedScore, extractTerms, keywordSql, likePattern, lexicalScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
+import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 
 const cases = [];
 function test(name, fn) {
