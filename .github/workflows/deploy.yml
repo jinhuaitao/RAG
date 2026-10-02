@@ -1,0 +1,39 @@
+name: Deploy RAG 知识库到 Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 建资源并部署
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      DB_NAME: rag-kb-db
+      INDEX_NAME: rag-kb-index
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 语法与逻辑检查
+        run: |
+          node --check src/index.js
+          node --check public/app.js
+          npm test
+
+      - name: 创建 D1 / Vectorize、执行迁移并部署（幂等，可重复运行）
+        run: bash scripts/provision.sh
