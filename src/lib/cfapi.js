@@ -106,11 +106,6 @@ export const d1 = {
 
 // ---- Vectorize（v2 端点，写入用 NDJSON）--------------------------------------
 export const vectorize = {
-  async listIndexes(env) {
-    const result = await call(env, "/accounts/{account_id}/vectorize/v2/indexes");
-    return Array.isArray(result) ? result : (result?.indexes ?? []);
-  },
-
   async createIndex(env, { name, dimensions, metric, description }) {
     return call(env, "/accounts/{account_id}/vectorize/v2/indexes", {
       method: "POST",
@@ -151,10 +146,12 @@ export const vectorize = {
   },
 
   async deleteByIds(env, name, ids) {
+    // 真实服务要求 {ids:[...]}（workerd 的官方绑定就是这么发的）；裸数组会被拒：
+    // "invalid type: string ..., expected a sequence"。wrangler 里仍是裸数组，属于滞后于服务端。
     return call(env, `/accounts/{account_id}/vectorize/v2/indexes/${encodeURIComponent(name)}/delete_by_ids`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(ids),
+      body: JSON.stringify({ ids }),
     });
   },
 };

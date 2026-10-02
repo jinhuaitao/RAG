@@ -152,8 +152,15 @@ async function handleApi(req, res) {
   }
 
   if (action === "delete_by_ids") {
-    const ids = JSON.parse(body || "[]");
-    if (!Array.isArray(ids)) return send(400, envelope(null, [{ message: "delete_by_ids 需要 JSON 数组" }]));
+    const payload = JSON.parse(body || "null");
+    if (Array.isArray(payload)) {
+      // 复刻真实服务端：裸数组会被按 Vec<Seq> 解析并报错，只接受 {ids: [...]}
+      return badRequest(`Failed to deserialize the JSON body into the target type: [0]: invalid type: string ${JSON.stringify(payload[0])}, expected a sequence`);
+    }
+    const ids = payload?.ids;
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+      return badRequest("delete_by_ids 需要 {ids: string[]}");
+    }
     for (const id of ids) index.vectors.delete(id);
     return send(200, envelope({ mutationId: randomUUID(), deleteCount: ids.length }));
   }
