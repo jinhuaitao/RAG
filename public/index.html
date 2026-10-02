@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>知识库问答 · Cloudflare RAG</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">RAG</span>
+        <div>
+          <h1>知识库问答</h1>
+          <p id="statusLine" class="muted">正在读取服务状态…</p>
+        </div>
+      </div>
+      <div class="token-box">
+        <input id="token" type="password" placeholder="访问令牌（未开启鉴权可留空）" autocomplete="off" />
+        <button id="saveToken" class="ghost" type="button">保存</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="ask" type="button">问答</button>
+      <button class="tab" data-tab="kb" type="button">知识库管理</button>
+    </nav>
+
+    <main>
+      <section id="panel-ask" class="panel active">
+        <div class="card">
+          <label for="question">提问</label>
+          <textarea id="question" rows="3" placeholder="例如：项目的退款流程是怎样的？"></textarea>
+          <div class="row">
+            <label>召回片段数 <select id="topK"><option>3</option><option selected>6</option><option>10</option></select></label>
+            <button id="askBtn" class="primary" type="button">提问</button>
+            <span id="askHint" class="muted"></span>
+          </div>
+        </div>
+        <div id="askResult" class="card result hidden">
+          <h2>回答</h2>
+          <div id="answer" class="answer"></div>
+          <h2 class="mt">引用来源</h2>
+          <div id="sources"></div>
+        </div>
+      </section>
+
+      <section id="panel-kb" class="panel">
+        <div class="card">
+          <h2>添加知识</h2>
+          <label for="docTitle">文档名称</label>
+          <input id="docTitle" type="text" placeholder="例如：退货政策 v2" />
+          <label for="files">上传文件（可多选，支持 .txt / .md / .csv / .json / .html）</label>
+          <input id="files" type="file" multiple />
+          <label for="pasted">或直接粘贴正文</label>
+          <textarea id="pasted" rows="7" placeholder="把文档内容粘贴到这里；填写文档名称后点“入库”。上传文件时此处内容会作为另一篇文档一起入库。"></textarea>
+          <div class="row">
+            <button id="ingestBtn" class="primary" type="button">入库</button>
+            <span id="ingestHint" class="muted"></span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="row space">
+            <h2>已入库文档</h2>
+            <button id="refreshBtn" class="ghost" type="button">刷新</button>
+          </div>
+          <div id="docList" class="muted">加载中…</div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

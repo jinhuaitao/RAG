@@ -1,0 +1,151 @@
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --ink: #1c2024;
+  --muted: #6b7480;
+  --line: #e3e6ea;
+  --accent: #f6821f;
+  --accent-ink: #ffffff;
+  --danger: #c9372c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { display: flex; gap: 14px; align-items: center; }
+.brand h1 { margin: 0; font-size: 18px; }
+.logo {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.token-box { display: flex; gap: 8px; flex: 0 1 340px; }
+.token-box input { min-width: 0; }
+
+.muted { color: var(--muted); font-size: 13px; }
+.mt { margin-top: 20px; }
+
+.tabs { display: flex; gap: 4px; padding: 12px 24px 0; }
+.tab {
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: #eef0f3;
+  padding: 8px 18px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  font-size: 14px;
+}
+.tab.active { background: var(--card); font-weight: 600; }
+
+main { padding: 0 24px 48px; max-width: 980px; margin: 0 auto; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0 10px 10px 10px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+label { display: block; margin: 12px 0 6px; font-size: 13px; color: var(--muted); }
+input[type="text"], input[type="password"], textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  background: #fff;
+  color: var(--ink);
+}
+input[type="file"] { width: 100%; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; }
+textarea { resize: vertical; }
+
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; }
+.row.space { justify-content: space-between; align-items: center; }
+.row label { margin: 0; }
+.row select { width: auto; }
+
+button { cursor: pointer; font: inherit; white-space: nowrap; }
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 9px 20px;
+  font-weight: 600;
+}
+.primary:disabled { opacity: 0.55; cursor: progress; }
+.ghost {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 14px;
+  color: var(--ink);
+}
+.danger { color: var(--danger); border-color: #f0cfcb; background: #fff; border-radius: 8px; padding: 6px 12px; border: 1px solid; }
+
+h2 { font-size: 15px; margin: 0 0 8px; }
+
+.answer { white-space: pre-wrap; word-break: break-word; }
+.cite {
+  display: inline-block;
+  background: #fdf0e2;
+  color: #a55a11;
+  border-radius: 5px;
+  padding: 0 5px;
+  margin: 0 1px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.source header { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.source .num { font-weight: 700; }
+.source .excerpt { margin-top: 8px; padding: 8px 10px; background: #fafbfc; border-left: 3px solid var(--accent); white-space: pre-wrap; font-size: 13px; }
+.doc { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.doc:first-child { border-top: none; }
+.doc .meta { flex: 1; min-width: 0; }
+.doc .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hidden { display: none; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  background: #24292f;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  z-index: 20;
+}
+.toast.error { background: var(--danger); }
