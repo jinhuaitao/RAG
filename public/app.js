@@ -255,6 +255,10 @@ async function submitIngest() {
   setBusy(true, $("ingestHint"));
   let done = 0;
   let failed = 0;
+  let dropped = 0;
+  let merged = 0;
+  let before = 0;
+  let after = 0;
   for (const job of jobs) {
     $("ingestHint").textContent = `入库中 ${done + failed + 1}/${jobs.length}：${job.title}`;
     try {
@@ -266,17 +270,21 @@ async function submitIngest() {
       });
       done += 1;
       const stats = data.cleaned;
-      const optimized =
-        stats && stats.before > stats.after
-          ? `，已优化资料 ${stats.before} → ${stats.after} 字（去掉 ${stats.droppedLines} 行噪声、合并 ${stats.mergedLines} 处断行）`
-          : "";
-      $("ingestHint").textContent = `《${data.title}》已切成 ${data.chunkCount} 个片段${optimized}`;
+      if (stats) {
+        dropped += stats.droppedLines;
+        merged += stats.mergedLines;
+        before += stats.before;
+        after += stats.after;
+      }
+      $("ingestHint").textContent = `《${data.title}》已切成 ${data.chunkCount} 个片段`;
     } catch (error) {
       failed += 1;
       toast(`${job.title} 入库失败：${error.message}`, true);
     }
   }
-  setBusy(false, $("ingestHint"));
+  const optimized =
+    dropped || merged ? `；资料已优化 ${before} → ${after} 字（去掉 ${dropped} 行噪声、合并 ${merged} 处断行）` : "";
+  setBusy(false, $("ingestHint"), `入库完成：成功 ${done} 篇${failed ? `，失败 ${failed} 篇` : ""}${optimized}`);
   $("pasted").value = "";
   $("files").value = "";
   $("docTitle").value = "";
