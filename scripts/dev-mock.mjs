@@ -176,6 +176,10 @@ const AI = {
       const texts = Array.isArray(input.text) ? input.text : [input.text];
       return { data: texts.map(fakeEmbedding), model: `${model} (mock)` };
     }
+    // 复刻真实账号上遇到过的下线错误（5028），用来验证 Worker 的中文提示分支
+    if (/llama-3\.1-8b-instruct(?!-fp8)/.test(model)) {
+      throw new Error(`5028: @cf/meta/infire-${model.split("/").pop()} was deprecated on 2026-05-30. See the model catalog for alternatives.`);
+    }
     const user = [...(input.messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
     const context = user.match(/【参考资料】([\s\S]*?)【问题】/)?.[1] ?? "";
     const question = user.match(/【问题】\n([\s\S]*)$/)?.[1]?.trim() ?? "";
@@ -208,7 +212,7 @@ const env = {
   EMBEDDING_MODEL: "@cf/mock/bge-m3",
   EMBEDDING_DIMENSIONS: String(DIMENSIONS),
   EMBEDDING_METRIC: "cosine",
-  CHAT_MODEL: "@cf/mock/llama",
+  CHAT_MODEL: process.env.CHAT_MODEL || "@cf/mock/llama",
   TOP_K: "6",
   CHUNK_MAX_CHARS: "600",
   CHUNK_OVERLAP_CHARS: "120",

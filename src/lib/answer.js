@@ -37,12 +37,23 @@ export async function generateAnswer(env, { question, passages }) {
   try {
     response = await env.AI.run(env.CHAT_MODEL, { messages, temperature: 0.2, max_tokens: 900 });
   } catch (error) {
-    if (/model|not found|invalid/i.test(String(error?.message))) {
-      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 调用失败：${error.message}`, {
+    const message = String(error?.message ?? error);
+    if (/deprecat/i.test(message)) {
+      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 已下线：${message}`, {
+        hint: [
+          "Workers AI 会定期下线旧模型，换一个仍然在架的 ID 即可，不需要改代码",
+          "同架构的替代 ID 通常是在模型名后加量化后缀，例如 @cf/meta/llama-3.1-8b-instruct 对应 @cf/meta/llama-3.1-8b-instruct-fp8",
+          "可选清单：https://developers.cloudflare.com/workers-ai/models/ 里筛 Text Generation",
+          "改 wrangler.jsonc 的 CHAT_MODEL 后提交到 GitHub，控制台会自动重新部署",
+        ],
+      });
+    }
+    if (/model|not found|invalid/i.test(message)) {
+      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 调用失败：${message}`, {
         hint: `登录账号后运行 npx wrangler ai models list 查看当前可用的 Text Generation 模型，把 wrangler.jsonc 里的 CHAT_MODEL 换成新的 ID（无需改代码）`,
       });
     }
-    throw new HttpError(502, `生成模型调用失败：${error.message}`);
+    throw new HttpError(502, `生成模型调用失败：${message}`);
   }
 
   const answer = response?.response ?? response?.result?.response;

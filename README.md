@@ -190,7 +190,7 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | `EMBEDDING_MODEL` | `@cf/baai/bge-m3` | 嵌入模型，多语言，适合中文资料 |
 | `EMBEDDING_DIMENSIONS` | `1024` | **必须与索引维度一致**，初始化时用它建索引 |
 | `EMBEDDING_METRIC` | `cosine` | 距离度量 |
-| `CHAT_MODEL` | `@cf/meta/llama-3.1-8b-instruct` | 生成模型 |
+| `CHAT_MODEL` | `@cf/meta/llama-3.1-8b-instruct-fp8` | 生成模型 |
 | `TOP_K` | `6` | 默认召回片段数，请求里可用 `topK` 覆盖（1–20） |
 | `CHUNK_MAX_CHARS` | `600` | 单切片目标长度（字符） |
 | `CHUNK_OVERLAP_CHARS` | `120` | 相邻切片重叠，防止句子在边界被切断 |
@@ -227,8 +227,8 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 **入库报「向量维度不匹配」**
 `EMBEDDING_MODEL` 的输出维度 ≠ `EMBEDDING_DIMENSIONS`。查该模型的实际维度并改正，然后按[换模型 / 换维度](#换模型--换维度)重建。
 
-**问答报「生成模型 … 调用失败」**
-Workers AI 的模型名会随版本调整。用 `npx wrangler ai models list`（需登录）找一个 Text Generation 模型，替换 `CHAT_MODEL` 后重新部署，无需改代码。
+**问答报「生成模型 … 已下线 / 调用失败」**
+Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` 已于 2026-05-30 下线，错误码 5028）。这类问题不用改代码：把 `wrangler.jsonc` 的 `CHAT_MODEL` 换成仍在架的 ID 再提交即可，同架构通常加个量化后缀就能对上（`…-instruct` → `…-instruct-fp8`）。完整清单见 [workers-ai/models](https://developers.cloudflare.com/workers-ai/models/) 里的 Text Generation，或登录后运行 `npx wrangler ai models list`。中文资料想要更好效果，可换 Qwen / Gemma 一类多语言模型试试。
 
 **能上传 PDF / Word 吗？**
 不能，接口返回 415 并说明原因：Worker 里没有可靠的二进制解析。请先导出为 `.md` 或 `.txt`（`pandoc in.docx -t gfm -o out.md`）。

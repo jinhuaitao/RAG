@@ -20,7 +20,7 @@
     "EMBEDDING_MODEL": "@cf/baai/bge-m3",
     "EMBEDDING_DIMENSIONS": "1024",
     "EMBEDDING_METRIC": "cosine",
-    "CHAT_MODEL": "@cf/meta/llama-3.1-8b-instruct",
+    "CHAT_MODEL": "@cf/meta/llama-3.1-8b-instruct-fp8",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",
     "CHUNK_OVERLAP_CHARS": "120",
