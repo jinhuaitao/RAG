@@ -4,7 +4,7 @@ import { cleanText } from "./lib/clean.js";
 import { grabUrl } from "./lib/grab.js";
 import { countAll, deleteDocumentRows, getChunkRows, keywordCandidates, listChunkIds, listDocuments, requireDocument, saveDocument } from "./lib/store.js";
 import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
-import { extractTerms, lexicalScore, rankCandidates, stripOverlap } from "./lib/rank.js";
+import { extractTerms, keywordTerms, overlapScore, rankCandidates, stripOverlap } from "./lib/rank.js";
 import { generateAnswer } from "./lib/answer.js";
 import { initialize, provisionStatus } from "./lib/setup.js";
 
@@ -130,20 +130,22 @@ async function ask(env, request) {
 
   const started = Date.now();
   const terms = extractTerms(question);
+  const coreTerms = keywordTerms(terms);
   const pool = Math.min(RECALL_POOL_MAX, Math.max(topK * 4, 8));
   // 两路召回同时进行：向量负责同义改写，LIKE 关键词负责专有名词、数字与日期，然后在本地重排
-  const [vectorHits, keywordHits] = await Promise.all([searchChunkIds(env, question, pool), keywordCandidates(env, terms, pool)]);
+  const [vectorHits, keywordHits] = await Promise.all([
+    searchChunkIds(env, question, pool),
+    keywordCandidates(env, coreTerms, pool),
+  ]);
 
   const candidateIds = [...new Set([...vectorHits.map((hit) => hit.id), ...keywordHits.map((hit) => hit.id)])];
   const rows = await getChunkRows(env, candidateIds);
-  const ranked = stripOverlap(
-    rankCandidates({ vectorHits, keywordHits, rows, terms, limit: topK })
-  );
+  const ranked = stripOverlap(rankCandidates({ vectorHits, keywordHits, rows, terms, coreTerms, limit: topK }));
 
   const timings = { totalMs: Date.now() - started, candidates: candidateIds.length };
   if (!ranked.length) {
     // 与其让模型硬答，不如直接说明没命中，并告诉用户怎么问才命中
-    const best = Math.max(0, ...[...rows.values()].map((row) => lexicalScore(terms, row.content)));
+    const best = Math.max(0, ...[...rows.values()].map((row) => overlapScore(terms, coreTerms, row.content)));
     return json({
       question,
       answer: rows.size

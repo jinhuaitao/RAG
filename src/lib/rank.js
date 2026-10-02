@@ -1,13 +1,16 @@
 import { HttpError } from "./http.js";
 
 // 检索用的词法信号：纯本地规则，不调模型，用来补上向量召回最容易漏掉的专有名词、数字与日期。
-const LATIN_TOKEN = /[A-Za-z][A-Za-z0-9_.+-]{1,}|\d[\d.,]*/g;
+// 提问里的疑问词、助词和客套话几乎不会出现在文档里，先把它们当分隔符，
+// 剩下的连续中文才当成「短语」去关键词召回
+const FILLER =
+  /请问|请教|想问|一下|是不是|是否|哪些|哪个|哪种|什么|怎么|怎样|如何|多少|几点|几天|需要|可以|能不能|应该|必须|我们|你们|他们|公司|的|了|吗|呢|吧|啊|呀|是|在|要|会|和|请/g;
+const LATIN_TOKEN = /[A-Za-z][A-Za-z0-9_.+-]+|\d+(?:[.,\-–~至]\d+)*/g;
 const CJK = /[㐀-䶿一-鿿぀-ヿ]+/g;
 
-// 中文没有空格分词，用连续两字（bigram）当检索单位：
-// 「退货要几天内申请」→ 退货、要几、天内、申请…，原文只要有相同措辞就能命中
-export function extractTerms(text, limit = 14) {
-  const source = String(text ?? "");
+// 检索单位有两层：整段中文短语（稀有、命中就说明真的在讲这件事）+ 双字（保召回）
+export function extractTerms(text, limit = 60) {
+  const source = String(text ?? "").replace(FILLER, " ");
   const terms = new Map();
   const push = (raw, weight) => {
     const clean = raw.replace(/[%_\\"'`;()（）[\]【】{}，。、；：！？,.;:!?“”‘’\s]+/g, "");
@@ -18,19 +21,20 @@ export function extractTerms(text, limit = 14) {
 
   for (const match of source.match(LATIN_TOKEN) ?? []) push(match, 2);
   for (const run of source.match(CJK) ?? []) {
+    if (run.length <= 8) push(run, 5);
     for (let i = 0; i + 2 <= run.length; i += 1) push(run.slice(i, i + 2), 1);
-    if (run.length >= 3) push(run.slice(0, 3), 2);
-    if (run.length >= 4) push(run.slice(0, 4), 3);
-    if (run.length >= 6) push(run.slice(0, 6), 4);
   }
-  // 长词更像专有名词，权重高；超出上限先丢最常见的双字
-  return [...terms.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, limit)
-    .map(([term, weight]) => ({ term, weight }));
+  return [...terms.entries()].slice(0, limit).map(([term, weight]) => ({ term, weight }));
 }
 
-// 覆盖率：命中词的权重 ÷ 全部词权重，长词命中比短词命中更能说明相关
+// 只拿短语和英文数字去做 LIKE 全表扫描：双字太常见，拿去扫库会把一堆无关片段捞进来
+export function keywordTerms(terms, limit = 8) {
+  const picked = terms.filter((entry) => entry.weight >= 2);
+  return (picked.length ? picked : terms).slice(0, limit);
+}
+
+// 覆盖率：命中词的权重 ÷ 全部词权重。长问题里双字词很多，只按全量算会把
+// 「踩中了专有名词」的片段淹掉，所以再单独算一遍稀有词的覆盖率取较大值
 export function lexicalScore(terms, content) {
   if (!terms.length) return 0;
   const haystack = String(content ?? "").toLowerCase();
@@ -41,6 +45,12 @@ export function lexicalScore(terms, content) {
     if (haystack.includes(term)) matched += weight;
   }
   return total ? matched / total : 0;
+}
+
+export function overlapScore(terms, coreTerms, content) {
+  const all = lexicalScore(terms, content);
+  const core = coreTerms.length ? lexicalScore(coreTerms, content) * 0.8 : 0;
+  return Math.max(all, core);
 }
 
 export function likePattern(term) {
@@ -68,17 +78,17 @@ export function combinedScore(vectorScore, lexical) {
   return 0.42 * Math.max(0, Math.min(1, vectorScore)) + 0.58 * lexical;
 }
 
-export function rankCandidates({ vectorHits, keywordHits, rows, terms, limit }) {
+export function rankCandidates({ vectorHits, keywordHits, rows, terms, coreTerms = terms, limit }) {
   const merged = new Map();
   for (const hit of vectorHits) merged.set(hit.id, { id: hit.id, vector: hit.score });
-  for (const hit of keywordHits) if (merged.has(hit.id)) merged.get(hit.id).keyword = true;
-  else merged.set(hit.id, { id: hit.id, vector: 0 });
+  // 关键词这一路的价值是把向量漏掉的片段带进候选池，分数仍由覆盖率决定
+  for (const hit of keywordHits) if (!merged.has(hit.id)) merged.set(hit.id, { id: hit.id, vector: 0 });
 
   const ranked = [];
   for (const entry of merged.values()) {
     const row = rows.get(entry.id);
     if (!row) continue;
-    const lexical = lexicalScore(terms, row.content);
+    const lexical = overlapScore(terms, coreTerms, row.content);
     ranked.push({
       docId: row.doc_id,
       title: row.title,

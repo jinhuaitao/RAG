@@ -4,7 +4,7 @@ import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
-import { combinedScore, extractTerms, keywordSql, lexicalScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
+import { combinedScore, extractTerms, keywordSql, likePattern, lexicalScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 
 const cases = [];
 function test(name, fn) {
@@ -236,13 +236,13 @@ test("检索：关键词覆盖率区分「踩中原文」与「只是话题相�
   assert.ok(vague < 0.2, vague);
 });
 
-test("检索：LIKE 关键词查询转义通配符且全部走占位符", () => {
-  const { sql, params } = keywordSql(extractTerms("折扣 30% 与 A_B 型号"), 24);
-  assert.equal((sql.match(/\?/g) || []).length, params.length);
-  assert.ok(!params.some((p) /[';]|--/.test(p)), params.join("|"));
+test("检索：LIKE 模式转义通配符，查询只走占位符", () => {
+  assert.equal(likePattern("50%_off"), "%50\\%\\_off%");
+  const { sql, params } = keywordSql(extractTerms("折扣 30% 与 A_B 型号的退货流程"), 24);
+  assert.equal((sql.match(/\?/g) || []).length, params.length, "占位符数量要与参数一致");
   assert.ok(params.every((p) => p.startsWith("%") && p.endsWith("%")));
-  assert.ok(/3\\%/.test(params.join("|")), `未转义的 % 会匹配任意内容：${params.join("|")}`);
-  assert.ok(/ESCAPE/.test(sql) && /LIMIT 24/.test(sql));
+  assert.ok(!params.some((p) => p.includes("'") || p.includes(";")), params.join("|"));
+  assert.ok(sql.includes("ESCAPE '\\'") && sql.includes("LIMIT 24"), sql);
 });
 
 test("检索：向量与关键词合并重排，弱相关片段被挡在门外", () => {
@@ -263,9 +263,9 @@ test("检索：向量与关键词合并重排，弱相关片段被挡在门外",
     terms,
     limit: 6,
   });
-  assert.equal(ranked[0].id ?? ranked[0].docId + ranked[0].ordinal, "a1", "踩中关键词的片段应排在只话题相近的前面");
+  assert.equal(ranked[0].docId + ":" + ranked[0].ordinal, "a:1", "踩中关键词的片段应排在只话题相近的前面");
   assert.ok(ranked.every((p) => !(p.docId === "b" && p.lexical < 0.12 && p.vector < 0.45)), "语义一般又零关键词命中的不该进上下文");
-  assert.ok(combinedScore(0.7, 0) > combinedScore(0.3, 0.9) === false, "关键词权重要高于语义分");
+  assert.ok(combinedScore(0.3, 0.9) > combinedScore(0.75, 0), "关键词权重要高于语义分");
 });
 
 test("检索：同篇相邻片段的重叠尾巴不再重复喂给模型", () => {
@@ -277,6 +277,16 @@ test("检索：同篇相邻片段的重叠尾巴不再重复喂给模型", () =>
   assert.equal(stripped.length, 2);
   assert.ok(!stripped[1].content.startsWith("开票时效"), stripped[1].content);
   assert.ok(stripped[1].content.includes("红字确认单"));
+});
+
+test("检索：命中专有名词的片段不会被一堆双字词稀释掉", () => {
+  const terms = extractTerms("请问一下我们公司的红字确认单在跨月的情況下要怎么处理才能正常开票呢");
+  const core = keywordTerms(terms);
+  assert.ok(core.length && core.every((entry) => entry.weight >= 2), "关键词召回只用稀有词");
+  assert.deepEqual(keywordTerms(extractTerms("退货 政策")).every((entry) => entry.weight >= 2), true);
+  const hit = "跨月的红字确认单需要税务岗先在系统里作废，再重新开票。";
+  const miss = "我们公司一直提倡大家及时开票，财务同事会很乐意协助处理相关事宜。";
+  assert.ok(overlapScore(terms, core, hit) > overlapScore(terms, core, miss) + 0.15, `${overlapScore(terms, core, hit)} vs ${overlapScore(terms, core, miss)}`);
 });
 
 let failed = 0;
