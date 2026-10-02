@@ -1,5 +1,6 @@
 import { fail, HttpError, json, readIngest, readJson, requireAuth, validateTextField } from "./lib/http.js";
 import { chunkText, extractText } from "./lib/chunk.js";
+import { cleanText } from "./lib/clean.js";
 import { countAll, deleteDocumentRows, getChunkRows, listChunkIds, listDocuments, requireDocument, saveDocument } from "./lib/store.js";
 import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
 import { generateAnswer } from "./lib/answer.js";
@@ -70,14 +71,23 @@ async function create(env, request) {
   const { title, text, origin } = await readIngest(request, env);
   validateTextField(text, Number(env.MAX_DOC_CHARS) || 200_000);
 
-  const chunks = chunkText(extractText(title, text), {
+  // 入库前先做规则清洗：去掉网页/Word/PDF 带来的噪声、合并被硬断开的行，
+  // 并把所属章节路径注入每个片段。清洗后的文本就是库里保存的文本。
+  const cleaned = cleanText(extractText(title, text));
+  if (!cleaned.text) {
+    throw new HttpError(400, "清洗后没有留下有效正文", {
+      hint: "原文可能只包含导航、页眉页脚或装饰符号，请只保留正文章节后重试",
+    });
+  }
+
+  const chunks = chunkText(cleaned.text, {
     maxChars: Number(env.CHUNK_MAX_CHARS) || 600,
     overlap: Number(env.CHUNK_OVERLAP_CHARS) || 120,
   });
   if (!chunks.length) throw new HttpError(400, "切片后没有可用内容，请检查文档是否为空或全为二进制内容");
 
   const docId = crypto.randomUUID();
-  await saveDocument(env, { docId, title, origin, text, chunks });
+  await saveDocument(env, { docId, title, origin, text: cleaned.text, chunks });
 
   let indexed;
   try {
@@ -87,7 +97,7 @@ async function create(env, request) {
     throw error;
   }
 
-  return json({ ok: true, docId, title, chunkCount: chunks.length, embedding: indexed }, 201);
+  return json({ ok: true, docId, title, chunkCount: chunks.length, cleaned: cleaned.stats, embedding: indexed }, 201);
 }
 
 async function remove(env, docId) {

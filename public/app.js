@@ -265,7 +265,12 @@ async function submitIngest() {
         body: JSON.stringify({ title: job.title, text }),
       });
       done += 1;
-      $("ingestHint").textContent = `《${data.title}》已切成 ${data.chunkCount} 个片段`;
+      const stats = data.cleaned;
+      const optimized =
+        stats && stats.before > stats.after
+          ? `，已优化资料 ${stats.before} → ${stats.after} 字（去掉 ${stats.droppedLines} 行噪声、合并 ${stats.mergedLines} 处断行）`
+          : "";
+      $("ingestHint").textContent = `《${data.title}》已切成 ${data.chunkCount} 个片段${optimized}`;
     } catch (error) {
       failed += 1;
       toast(`${job.title} 入库失败：${error.message}`, true);
