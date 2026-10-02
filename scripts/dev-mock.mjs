@@ -226,11 +226,34 @@ const env = {
   MAX_DOC_CHARS: "200000",
   MAX_CONTEXT_CHARS: "12000",
   ADMIN_TOKEN: process.env.ADMIN_TOKEN || "mock-token",
+  // 本机端到端要抓取 127.0.0.1 的示例页，所以只在 mock 里放开内网拦截
+  ALLOW_PRIVATE_URLS: "true",
+  FETCH_TIMEOUT_MS: "5000",
+  FETCH_MAX_BYTES: "800000",
 };
 
 api.listen(API_PORT, "127.0.0.1");
 
+const SAMPLE_PAGE = readFileSync(new URL("../fixtures/return-policy.html", import.meta.url));
+
+function serveSample(res, status, headers) {
+  res.writeHead(status, headers);
+  res.end(SAMPLE_PAGE);
+}
+
 createServer(async (req, res) => {
+  const path = new URL(req.url, `http://127.0.0.1:${APP_PORT}`).pathname;
+  // 供网址抓取端到端使用：一个真实网页 + 一次重定向，都走本机地址
+  if (path === "/fixture/page") {
+    return serveSample(res, 200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  }
+  if (path === "/fixture/redirect") {
+    return serveSample(res, 302, { location: `http://127.0.0.1:${APP_PORT}/fixture/page`, "cache-control": "no-store" });
+  }
+  if (path === "/fixture/plain") {
+    return serveSample(res, 200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+  }
+
   const parts = [];
   for await (const chunk of req) parts.push(chunk);
   const request = new Request(`http://127.0.0.1:${APP_PORT}${req.url}`, {

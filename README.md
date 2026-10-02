@@ -26,6 +26,7 @@
 - [一键部署（Cloudflare 控制台）](#一键部署cloudflare-控制台)
 - [第一次使用](#第一次使用)
 - [入库时如何优化资料](#入库时如何优化资料)
+- [用网址入库](#用网址入库)
 - [本地跑起来](#本地跑起来)
 - [HTTP API](#http-api)
 - [配置项](#配置项)
@@ -112,7 +113,7 @@ curl -s -X POST https://rag-kb.<子域>.workers.dev/api/admin/setup \
 
 ## 第一次使用
 
-1. 切到**知识库管理** → 粘贴正文，或选择 `.txt / .md / .csv / .json / .html` 文件（可多选）→ **入库**。入库前会自动做一轮[资料优化](#入库时如何优化资料)，然后切成约 600 字符、带 120 字符重叠的片段，同时写入 D1 与向量索引。提示行会写明「211 → 137 字（去掉 5 行噪声、合并 2 处断行）」。
+1. 切到**知识库管理** → 粘贴正文、选择 `.txt / .md / .csv / .json / .html` 文件（可多选），或填一个[网页地址](#用网址入库)让 Worker 替你抓 → **入库**。入库前会自动做一轮[资料优化](#入库时如何优化资料)，然后切成约 600 字符、带 120 字符重叠的片段，同时写入 D1 与向量索引。提示行会写明「211 → 137 字（去掉 5 行噪声、合并 2 处断行）」。
 2. 回到**问答** → 输入问题（⌘/Ctrl + Enter 提交）→ 回答中的 `[1]` 是引用角标，下方来源卡片给出相似度分数与原文摘录，据此可核对模型有没有编造。
 3. 资料写错或过时 → 在知识库列表点**删除**，向量与切片一起清掉。
 4. 之后每次 `git push` 只更新代码，D1 与 Vectorize 里的数据不会丢。
@@ -128,6 +129,25 @@ curl -s -X POST https://rag-kb.<子域>.workers.dev/api/admin/setup \
 - **注入章节路径**：识别 markdown 标题、`第X条/章/节`、`一、`、`（一）`、`2.1` 等序号，把所属章节写进每个片段开头，例如 `【一、发票开具】\n电子发票在订单完成后…`。跨章节之间不做重叠，避免把上一章内容混进本章召回。
 
 删除策略刻意保守：只有**整行**都是噪声词、或短行（≤40 字且不以句号结尾）命中强噪声特征时才删。所以「本文件版权所有，未经授权不得转发。」这种正文会完整保留，而页脚的「版权所有 侵权必究」会被清掉。清洗后的文本就是库里保存的文本。
+
+## 用网址入库
+
+在「添加知识」里填一个网址，点**抓取并入库**（或直接在输入框按回车）。抓取在 **Worker 内**完成——浏览器直接 fetch 别人的网站会被 CORS 拦掉，所以必须由服务端代取。只抓你填的那**一个页面**，不做整站爬取。
+
+流程是：抓取 → `<article>`/`<main>`/`<body>` 里取正文 → 去标签与实体还原 → 正常的[规则清洗 + 结构化切片](#入库时如何优化资料) → 写库。文档名默认取页面的 `og:title`，没有就用 `<title>`，再没有就用域名。
+
+防护与边界：
+
+- **超时**：单跳最多 `FETCH_TIMEOUT_MS`（默认 8 秒），超了返回 504 并提示可调。
+- **内网拦截**：`http/https` 之外的协议、URL 里带账号密码、`localhost`/`*.local`/`*.internal`、以及 `127.0.0.0/8`、`10/8`、`172.16/12`、`192.168/16`、`100.64/10`、`169.254/16`、`0.0.0.0/8`、组播段，IPv6 的 `::1`、`fe80::/10`、`fc00::/7`、`ff00::/8`、Teredo `2001:0::/32`、6to4 `2002::/16` 与内嵌私网 IPv4 的映射地址，全部直接 400 拒绝。十进制/十六进制/短写形式的 IPv4（如 `http://0x7f000001/`、`http://127.1/`）会先由 URL 解析归一化成点分十进制再判断，绕不过去。
+- **元数据地址永远不放行**：`169.254.0.0/16`（含云厂商 `169.254.169.254`）、`0.0.0.0/8`、链路本地与组播不受开关影响。
+- **重定向逐跳复验**：最多跟 3 跳，每一跳的 `Location` 都重新过一遍上面的校验，防止「公网地址 302 到内网」。
+- **大小限制**：先看 `Content-Length`，再边读边累计，超过 `FETCH_MAX_BYTES`（默认 800 KB）立即中断连接并返回 413，不会被超大页面吃满内存。
+- **只收文本**：返回 PDF / Word / 图片 / `octet-stream` 一律 415；非 2xx 会翻成中文提示（401/403 → 需要登录或反爬，建议复制正文；404 → 页面不存在；429 → 被限流）。
+
+已知限制：靠 JavaScript 渲染的页面（SPA、需滚动加载的正文）抓不到内容，返回 422 并提示改用「粘贴正文」；需要登录的站点抓不到；Workers 无法在抓取前做 DNS 解析，所以理论上存在 DNS rebinding（域名先解析成公网、请求时改指内网）与 `1.2.3.4.nip.io` 这类把内网 IP 编进域名的服务，若知识库开放给他人使用，建议给 Worker 加上 Access。
+
+本地 `npm run preview` 自带一个可抓取的示例页（`http://127.0.0.1:8790/fixture/redirect`），mock 环境把 `ALLOW_PRIVATE_URLS` 设为 `true` 才能抓本机地址。
 
 ## 本地跑起来
 
@@ -153,7 +173,7 @@ npm run dev                       # wrangler dev --remote
 其他脚本：
 
 ```bash
-npm test           # 切片逻辑单元测试（中文分段 / 重叠 / HTML 抽取）
+npm test           # 单元与逻辑测试：切片 / 清洗 / 向量序列化 / 网址抓取内网拦截 / HTML 抽正文
 npm run check      # 全部 JS 语法检查
 npm run schema:dump# 由 src/lib/schema.js 重新导出 schema.sql
 npm run deploy     # 只部署代码，不建资源
@@ -180,6 +200,12 @@ curl -s -X POST $BASE/api/documents -H "$AUTH" -H 'content-type: application/jso
 
 # 入库（上传文件，multipart）
 curl -s -X POST $BASE/api/documents -H "$AUTH" -F 'file=@手册.md'
+
+# 入库（抓一个网页，见「用网址入库」）
+curl -s -X POST $BASE/api/documents -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"url":"https://example.com/help/return-policy"}'
+# → {"ok":true,"docId":"…","title":"退货与换货政策","origin":"url",
+#    "sourceUrl":"https://example.com/help/return-policy","chunkCount":3,"cleaned":{…}}
 
 # 列表 / 删除
 curl -s $BASE/api/documents -H "$AUTH"
@@ -210,6 +236,9 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | `CHUNK_OVERLAP_CHARS` | `120` | 相邻切片重叠，防止句子在边界被切断 |
 | `MAX_DOC_CHARS` | `200000` | 单篇文档上限，超出返回 413 |
 | `MAX_CONTEXT_CHARS` | `12000` | 拼进提示词的参考资料总长度上限 |
+| `FETCH_TIMEOUT_MS` | `8000` | 网址抓取单跳超时（2–30 秒之间取整） |
+| `FETCH_MAX_BYTES` | `800000` | 网址抓取正文大小上限，超了边读边中断（4–6000000） |
+| `ALLOW_PRIVATE_URLS` | `false` | 设为 `true` 才允许抓本机/内网网址，仅供调试；元数据地址不受它影响 |
 | `ACCOUNT_ID` | 空 | 备用；优先读 Secret `CLOUDFLARE_ACCOUNT_ID` |
 
 ## 换模型 / 换维度
@@ -244,6 +273,9 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 **问答报「生成模型 … 已下线 / 调用失败」**
 Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` 已于 2026-05-30 下线，错误码 5028）。这类问题不用改代码：把 `wrangler.jsonc` 的 `CHAT_MODEL` 换成仍在架的 ID 再提交即可，同架构通常加个量化后缀就能对上（`…-instruct` → `…-instruct-fp8`）。完整清单见 [workers-ai/models](https://developers.cloudflare.com/workers-ai/models/) 里的 Text Generation，或登录后运行 `npx wrangler ai models list`。中文资料想要更好效果，可换 Qwen / Gemma 一类多语言模型试试。
 
+**抓不到正文 / 报 422**
+只有服务端返回的 HTML 抓得到；靠 JavaScript 现渲染的页面（大多数 SPA、需要登录的站点、带反爬的站点）抓不到，返回 422 并提示改用「粘贴正文」——在浏览器里全选复制即可，效果一样。
+
 **能上传 PDF / Word 吗？**
 不能，接口返回 415 并说明原因：Worker 里没有可靠的二进制解析。请先导出为 `.md` 或 `.txt`（`pandoc in.docx -t gfm -o out.md`）。
 
@@ -262,6 +294,7 @@ Workers 免费计划含每天 10 万次请求；Workers AI 的免费用量按模
 - **Token 最小化**：请只授予上表那几项权限，不要把 Global Key 或 Zone 权限塞进来；这个 Token 会随每次请求出现在 Worker 的出站头里。
 - **不会被注入**：文档正文、回答与来源一律用 `textContent` 渲染，不执行任何 HTML；SQL 全部走占位符参数。
 - **有上限**：请求体、单篇文档长度、召回片段数都有边界，PDF 等二进制直接拒收。
+- **抓取不越界**：网址入库只走 `http/https`、只跟 3 跳且逐跳复验，内网、回环、链路本地与组播地址一律拒绝，云厂商元数据段（`169.254.0.0/16` 等）不受任何开关影响；出站请求只带公开的 UA 与 Accept 头，**不会携带 `ADMIN_TOKEN` 或 Cloudflare API Token**。详见[用网址入库](#用网址入库)。
 - 建议给 Worker 域名开启访问控制（Zero Trust / Access）或至少保持 `ADMIN_TOKEN` 足够长。
 
 ## 项目结构
@@ -276,6 +309,7 @@ src/lib/store.js         通过 REST 读写 D1（切片原文按向量 id 回查
 src/lib/rag.js           嵌入、批量 upsert、向量检索、维度校验
 src/lib/chunk.js         中英混合文本切片（段落 → 句子 → 重叠打包）与标题层级识别
 src/lib/clean.js         入库前的规则清洗：去噪声行、合并硬断行、展开行内标记
+src/lib/grab.js          网址入库：SSRF 拦截、超时与大小上限、HTML 抽正文
 src/lib/answer.js        中文系统提示词、上下文拼装、生成调用
 src/lib/http.js          JSON 响应、错误包装、请求体解析、令牌校验
 public/                  问答与知识库管理页面（原生 HTML/CSS/JS，无构建）

@@ -1,6 +1,7 @@
 import { fail, HttpError, json, readIngest, readJson, requireAuth, validateTextField } from "./lib/http.js";
 import { chunkText, extractText } from "./lib/chunk.js";
 import { cleanText } from "./lib/clean.js";
+import { grabUrl } from "./lib/grab.js";
 import { countAll, deleteDocumentRows, getChunkRows, listChunkIds, listDocuments, requireDocument, saveDocument } from "./lib/store.js";
 import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
 import { generateAnswer } from "./lib/answer.js";
@@ -68,7 +69,15 @@ async function list(env) {
 }
 
 async function create(env, request) {
-  const { title, text, origin } = await readIngest(request, env);
+  const input = await readIngest(request, env);
+  let { title, text } = input;
+  let sourceUrl = "";
+  if (input.origin === "url") {
+    const grabbed = await grabUrl(env, input.url);
+    text = grabbed.text;
+    sourceUrl = grabbed.finalUrl;
+    title = title || grabbed.title || new URL(grabbed.finalUrl).hostname;
+  }
   validateTextField(text, Number(env.MAX_DOC_CHARS) || 200_000);
 
   // 入库前先做规则清洗：去掉网页/Word/PDF 带来的噪声、合并被硬断开的行，
@@ -87,7 +96,7 @@ async function create(env, request) {
   if (!chunks.length) throw new HttpError(400, "切片后没有可用内容，请检查文档是否为空或全为二进制内容");
 
   const docId = crypto.randomUUID();
-  await saveDocument(env, { docId, title, origin, text: cleaned.text, chunks });
+  await saveDocument(env, { docId, title, origin: input.origin, text: cleaned.text, chunks });
 
   let indexed;
   try {
@@ -97,7 +106,7 @@ async function create(env, request) {
     throw error;
   }
 
-  return json({ ok: true, docId, title, chunkCount: chunks.length, cleaned: cleaned.stats, embedding: indexed }, 201);
+  return json({ ok: true, docId, title, origin: input.origin, sourceUrl, chunkCount: chunks.length, cleaned: cleaned.stats, embedding: indexed }, 201);
 }
 
 async function remove(env, docId) {

@@ -45,6 +45,7 @@ function setBusy(busy, hintEl, text) {
   if (hintEl) hintEl.textContent = text || (busy ? "处理中，请稍候…" : "");
   $("askBtn").disabled = busy;
   $("ingestBtn").disabled = busy;
+  $("grabBtn").disabled = busy;
 }
 
 function renderTopLine(counts) {
@@ -132,7 +133,8 @@ function renderDocs(target, documents) {
     title.textContent = doc.title;
     const stats = document.createElement("div");
     stats.className = "muted";
-    stats.textContent = `${doc.chunk_count} 个片段 · ${doc.char_count} 字 · ${doc.origin === "upload" ? "文件上传" : "粘贴"} · ${doc.created_at}`;
+    const originLabel = { upload: "文件上传", paste: "粘贴", url: "网址抓取" }[doc.origin] || doc.origin;
+    stats.textContent = `${doc.chunk_count} 个片段 · ${doc.char_count} 字 · ${originLabel} · ${doc.created_at}`;
     meta.append(title, stats);
 
     const del = document.createElement("button");
@@ -292,6 +294,33 @@ async function submitIngest() {
   await Promise.all([loadDocs(), loadStatus()]);
 }
 
+async function submitUrl() {
+  const url = $("pageUrl").value.trim();
+  if (!url) return toast("请先填写网址", true);
+  const hint = $("ingestHint");
+  setBusy(true, hint);
+  hint.textContent = `抓取中：${url}`;
+  try {
+    const body = { url };
+    const title = $("docTitle").value.trim();
+    if (title) body.title = title;
+    const data = await api("/api/documents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const stats = data.cleaned;
+    const optimized = stats && stats.before > stats.after ? `，资料已优化 ${stats.before} → ${stats.after} 字` : "";
+    setBusy(false, hint, `《${data.title}》已切成 ${data.chunkCount} 个片段${optimized}`);
+    $("pageUrl").value = "";
+    $("docTitle").value = "";
+    await Promise.all([loadDocs(), loadStatus()]);
+  } catch (error) {
+    setBusy(false, hint);
+    toast(`网址抓取失败：${error.message}`, true);
+  }
+}
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
@@ -314,6 +343,10 @@ $("question").addEventListener("keydown", (event) => {
   if ((event.metaKey || event.key === "Enter") && event.target === $("question")) submitAsk();
 });
 $("ingestBtn").addEventListener("click", submitIngest);
+$("grabBtn").addEventListener("click", submitUrl);
+$("pageUrl").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") submitUrl();
+});
 $("refreshBtn").addEventListener("click", loadDocs);
 
 loadStatus();

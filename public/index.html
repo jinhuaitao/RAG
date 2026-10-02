@@ -61,6 +61,11 @@
           <input id="docTitle" type="text" placeholder="例如：退货政策 v2" />
           <label for="files">上传文件（可多选，支持 .txt / .md / .csv / .json / .html）</label>
           <input id="files" type="file" multiple />
+          <label for="pageUrl">或填写网址，只抓取这一个页面（不整站爬取）</label>
+          <div class="row">
+            <input id="pageUrl" type="url" placeholder="https://example.com/article" style="flex:1" />
+            <button id="grabBtn" type="button">抓取并入库</button>
+          </div>
           <label for="pasted">或直接粘贴正文</label>
           <textarea id="pasted" rows="7" placeholder="把文档内容粘贴到这里；填写文档名称后点“入库”。上传文件时此处内容会作为另一篇文档一起入库。"></textarea>
           <div class="row">

@@ -68,9 +68,16 @@ export async function readIngest(request, env) {
   }
 
   const body = await readJson(request);
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (url && body.text === undefined && body.content === undefined) {
+    // 网址抓取由 create() 发起，这样本模块不依赖抓取模块，避免循环导入
+    return { title: String(body.title || "").trim(), url, text: "", origin: "url" };
+  }
   const text = typeof body.text === "string" ? body.text : typeof body.content === "string" ? body.content : "";
-  if (body.text === undefined && body.content === undefined) throw new HttpError(400, "缺少字段 text（要入库的正文内容）");
-  return { title: String(body.title || "未命名文档").trim() || "未命名文档", text, origin: "paste" };
+  if (body.text === undefined && body.content === undefined) {
+    throw new HttpError(400, "缺少字段：请提供 text（正文内容）或 url（要抓取的网页地址）");
+  }
+  return { title: String(body.title || "未命名文档").trim() || "未命名文档", url: "", text, origin: "paste" };
 }
 
 export function validateTextField(text, maxChars) {

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib/chunk.js";
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
+import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 
 const cases = [];
 function test(name, fn) {
@@ -143,6 +145,76 @@ test("标题识别覆盖 markdown、中文序号与十进制编号", () => {
   assert.equal(detectHeading("第三条 适用范围").title, "第三条 适用范围");
   assert.equal(detectHeading("2.1 开票时效").level, 2);
   assert.equal(detectHeading("本段落落在这里。"), null);
+});
+
+const BLOCKED_URLS = [
+  "http://localhost:8788/x",
+  "http://127.0.0.1/",
+  "http://0.0.0.0/",
+  "http://10.1.2.3/",
+  "http://172.16.0.1/",
+  "http://192.168.1.1/",
+  "http://100.64.0.1/",
+  "http://169.254.169.254/latest/meta-data/",
+  "http://0x7f000001/",
+  "http://127.1/",
+  "http://[::1]/",
+  "http://[fd00::1]/",
+  "http://[fe80::1%eth0]/",
+  "http://[2001:0::1]/",
+  "http://[2002:7f00:1::]/",
+  "http://[::ffff:192.168.0.1]/",
+  "http://intranet.local/",
+  "http://svc.internal/",
+  "https://admin:p@ssw0rd@example.com/doc",
+  "ftp://example.com/doc",
+  "javascript:alert(1)",
+  "不是一个网址",
+];
+
+test("网址抓取：内网、保留地址与非法协议一律拒绝", () => {
+  for (const url of BLOCKED_URLS) {
+    assert.throws(() => assertPublicUrl(url, {}), (error) => error.status === 400, `应被拒绝：${url}`);
+  }
+});
+
+test("网址抓取：公网地址放行，内网开关只影响本机", () => {
+  for (const url of ["https://example.com/docs", "https://example.com:8443/x?y=1#z", "http://93.184.216.34/", "https://[2606:2800::1]/"]) {
+    assert.ok(assertPublicUrl(url, {}).hostname, `应放行：${url}`);
+  }
+  assert.equal(assertPublicUrl("http://127.0.0.1:8790/x", { ALLOW_PRIVATE_URLS: "true" }).hostname, "127.0.0.1");
+  // 开关只放开内网调试，元数据/链路本地/组播地址永远拒绝
+  const allowPrivate = { ALLOW_PRIVATE_URLS: "true" };
+  for (const url of ["http://169.254.169.254/latest/meta-data/", "http://0.0.0.0/", "http://[fe80::1]/", "http://[ff02::1]/"]) {
+    assert.throws(() => assertPublicUrl(url, allowPrivate), (error) => error.status === 400, `开关下仍应拒绝：${url}`);
+  }
+});
+
+const SAMPLE_PAGE = readFileSync(new URL("../fixtures/return-policy.html", import.meta.url), "utf8");
+
+test("网址抓取：只取正文，去掉脚本、导航、页脚并还原结构", () => {
+  const text = htmlToText(SAMPLE_PAGE);
+  assert.ok(text.includes("## 一、退货条件"), text.slice(0, 200));
+  assert.ok(text.includes("- 定制类商品不支持七天无理由退货"), "列表项应带 - 前缀");
+  assert.ok(text.includes("银行卡 | 3–5 个工作日"), `表格应转成分隔文本：${text}`);
+  for (const junk of ["tracking", "不应进入正文", "footerLinks", "首页 > 帮助中心", "登录 注册", "分享 收藏", "Copyright"]) {
+    assert.ok(!text.includes(junk), `不应保留噪声内容：${junk}`);
+  }
+  assert.ok(!text.includes("&") && !text.includes("<"), `实体与标签应已还原：${text}`);
+});
+
+test("网址抓取：网页正文经清洗与切片后可正常检索", () => {
+  const cleaned = cleanText(htmlToText(SAMPLE_PAGE));
+  assert.ok(cleaned.text.includes("退货申请需要在签收后七天内提交，逾期不再受理。"), "被硬断开的行应被合并");
+  assert.ok(!cleaned.text.includes("示例商店"), "站名等重复行应被去掉");
+  const chunks = chunkText(cleaned.text, { maxChars: 600, overlap: 120 });
+  assert.ok(chunks.length >= 1);
+  assert.ok(cleaned.text.includes("## 二、退款到账"), "标题应还原成 markdown 层级，供切片注入章节路径");
+  assert.ok(cleaned.text.includes("银行卡 | 3–5 个工作日"), cleaned.text);
+});
+
+test("网址抓取：非 HTML 文本按原样保留", () => {
+  assert.equal(htmlToText("纯文本，没有标签。"), "纯文本，没有标签。");
 });
 
 let failed = 0;
