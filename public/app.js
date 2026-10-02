@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "rag-kb-token";
 
-const state = { token: localStorage.getItem(TOKEN_KEY) || "", busy: false };
+const state = { token: localStorage.getItem(TOKEN_KEY) || "", busy: false, status: null, counts: null };
 $("token").value = state.token;
 
 function headers(extra) {
@@ -25,9 +25,9 @@ async function api(path, options = {}) {
     throw new Error(`接口 ${path} 返回了非 JSON 内容`);
   }
   if (!response.ok) {
-    const hint = body?.hint || (body?.details?.hint ?? "");
-    const lines = Array.isArray(hint) ? hint.join(" ") : hint;
-    throw new Error(`${body?.error || `HTTP ${response.status}`}${lines ? `｜${lines}` : ""}`);
+    const raw = body?.hint ?? body?.details?.hint ?? "";
+    const hint = Array.isArray(raw) ? raw.join(" ") : raw;
+    throw new Error(`${body?.error || `HTTP ${response.status}`}${hint ? `｜${hint}` : ""}`);
   }
   return body;
 }
@@ -37,7 +37,7 @@ function toast(message, isError = false) {
   el.textContent = message;
   el.className = `toast${isError ? " error" : ""}`;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.add("hidden"), isError ? 9000 : 4000);
+  toast.timer = setTimeout(() => el.classList.add("hidden"), isError ? 12000 : 4000);
 }
 
 function setBusy(busy, hintEl, text) {
@@ -47,11 +47,22 @@ function setBusy(busy, hintEl, text) {
   $("ingestBtn").disabled = busy;
 }
 
+function renderTopLine(counts) {
+  const status = state.status;
+  if (!status) return;
+  if (counts) state.counts = counts;
+  const c = status.config;
+  const parts = [];
+  if (state.counts) parts.push(`${state.counts.docs} 篇文档 · ${state.counts.chunks} 个片段`);
+  parts.push(`嵌入 ${c.embedding_model}（${c.embedding_dimensions} 维）`);
+  parts.push(status.auth_required ? "已开启鉴权" : "未配置 ADMIN_TOKEN");
+  $("statusLine").textContent = parts.join(" · ");
+}
+
 // 只按 [数字] 拆分并生成节点，正文始终用 textContent 插入，避免文档内容注入 HTML
 function renderAnswer(target, text, sourceCount) {
   target.textContent = "";
-  const parts = String(text).split(/(\[\d+\])/);
-  for (const part of parts) {
+  for (const part of String(text).split(/(\[\d+\])/)) {
     if (/^\[\d+\]$/.test(part)) {
       const span = document.createElement("span");
       span.className = "cite";
@@ -71,7 +82,7 @@ function renderAnswer(target, text, sourceCount) {
 
 function renderSources(target, sources) {
   target.textContent = "";
-  if (!sources || !sources.length) {
+  if (!sources?.length) {
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent = "无引用来源。";
@@ -146,12 +157,40 @@ function renderDocs(target, documents) {
   }
 }
 
+function missingList(provision) {
+  const missing = [];
+  if (!provision.credentials) missing.push("Worker 还缺少 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 两个 Secret");
+  if (!provision.database) missing.push(`D1 数据库 ${state.status.config.database_name}`);
+  if (!provision.tables) missing.push("documents / chunks 两张表");
+  if (!provision.index) missing.push(`Vectorize 索引 ${state.status.config.index_name}（${state.status.config.embedding_dimensions} 维）`);
+  return missing;
+}
+
+function renderSetup() {
+  const status = state.status;
+  const card = $("setup");
+  if (!status) return;
+  if (status.provisioned) {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+  const missing = missingList(status.provision);
+  const prefix = status.provision.error ? `${status.provision.error}；缺失：` : "";
+  const credentialNote = status.provision.credentials
+    ? "点按钮即可创建，几秒钟后完成。"
+    : "先在 Workers 控制台 Settings → Variables and Secrets 添加 Secret：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID，然后回来点按钮。";
+  $("setupDetail").textContent = `${prefix}${missing.join("、")}。${credentialNote}`;
+}
+
 async function loadStatus() {
   try {
-    const data = await api("/api/status");
-    const c = data.config;
-    $("statusLine").textContent = `${data.counts.docs} 篇文档 · ${data.counts.chunks} 个片段 · 嵌入 ${c.embedding_model}（${c.embedding_dimensions} 维）${data.auth_required ? " · 已开启鉴权" : " · 未开启鉴权"}`;
-    if (data.auth_required && !state.token) toast("该服务开启了鉴权，请在右上角填写访问令牌", true);
+    state.status = await api("/api/status");
+    renderTopLine();
+    renderSetup();
+    if (!state.status.auth_required) {
+      toast("未配置 ADMIN_TOKEN：除状态接口外所有功能都被拒绝。请在控制台 Settings → Variables and Secrets 添加 Secret ADMIN_TOKEN", true);
+    }
   } catch (error) {
     $("statusLine").textContent = `服务状态获取失败：${error.message}`;
   }
@@ -163,9 +202,24 @@ async function loadDocs() {
   try {
     const data = await api("/api/documents");
     renderDocs(target, data.documents);
+    renderTopLine(data.counts);
   } catch (error) {
     target.classList.add("muted");
     target.textContent = `加载失败：${error.message}`;
+  }
+}
+
+async function runSetup() {
+  setBusy(true, $("setupHint"));
+  try {
+    const data = await api("/api/admin/setup", { method: "POST" });
+    $("setupHint").textContent = data.steps.map((s) => `${s.step}:${s.action}`).join(" · ");
+    toast("资源已就绪，可以开始入库了");
+    setBusy(false, $("setupHint"));
+    await Promise.all([loadStatus(), loadDocs()]);
+  } catch (error) {
+    setBusy(false, $("setupHint"));
+    toast(error.message, true);
   }
 }
 
@@ -188,11 +242,6 @@ async function submitAsk() {
     toast(error.message, true);
     setBusy(false, $("askHint"));
   }
-}
-
-async function readFile(file) {
-  const text = await file.text();
-  return { title: file.name.replace(/\.[^.]+$/, ""), text };
 }
 
 async function submitIngest() {
@@ -247,8 +296,9 @@ $("saveToken").addEventListener("click", () => {
 });
 
 $("askBtn").addEventListener("click", submitAsk);
+$("setupBtn").addEventListener("click", runSetup);
 $("question").addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitAsk();
+  if ((event.metaKey || event.key === "Enter") && event.target === $("question")) submitAsk();
 });
 $("ingestBtn").addEventListener("click", submitIngest);
 $("refreshBtn").addEventListener("click", loadDocs);

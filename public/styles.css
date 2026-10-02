@@ -135,6 +135,8 @@ h2 { font-size: 15px; margin: 0 0 8px; }
 
 .hidden { display: none; }
 
+.setup { border-left: 4px solid var(--accent); background: #fffaf4; }
+
 .toast {
   position: fixed;
   left: 50%;

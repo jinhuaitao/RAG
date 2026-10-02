@@ -11,23 +11,15 @@
   "ai": {
     "binding": "AI"
   },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "rag-kb-db",
-      // provision.sh / GitHub Actions 会自动把真实 UUID 写回这里；手动部署时见 README 第 3 步
-      "database_id": "REPLACE_BY_PROVISION_SCRIPT"
-    }
-  ],
-  "vectorize": [
-    {
-      "binding": "VECTORIZE",
-      "index_name": "rag-kb-index"
-    }
-  ],
+  // 故意不声明 d1_databases / vectorize：D1 与 Vectorize 由 Worker 自己通过 Cloudflare REST API 创建和读写，
+  // 所以控制台连上 GitHub 就能首次部署成功，不需要预先填任何资源 ID。
   "vars": {
+    "ACCOUNT_ID": "",
+    "DB_NAME": "rag-kb-db",
+    "INDEX_NAME": "rag-kb-index",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3",
     "EMBEDDING_DIMENSIONS": "1024",
+    "EMBEDDING_METRIC": "cosine",
     "CHAT_MODEL": "@cf/meta/llama-3.1-8b-instruct",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",

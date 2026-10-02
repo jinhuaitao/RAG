@@ -3,16 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "运行在 Cloudflare Workers + Vectorize + D1 上的 RAG 知识库问答，支持 GitHub 一键部署",
+  "description": "运行在 Cloudflare Workers + Workers AI + Vectorize + D1 上的 RAG 知识库问答，控制台连 GitHub 即可部署",
   "main": "src/index.js",
   "scripts": {
-    "dev": "wrangler dev",
-    "dev:remote": "wrangler dev --remote",
     "preview": "node scripts/dev-mock.mjs",
-    "setup": "bash scripts/provision.sh",
-    "migrate:local": "wrangler d1 execute rag-kb-db --local --file=schema.sql",
-    "migrate:remote": "wrangler d1 execute rag-kb-db --remote --file=schema.sql",
+    "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
+    "setup": "bash scripts/deploy.sh",
+    "schema:dump": "node scripts/dump-schema.mjs",
     "check": "bash scripts/check.sh",
     "test": "node scripts/test.mjs"
   },
@@ -20,6 +18,6 @@
     "wrangler": "^4.146.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

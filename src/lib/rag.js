@@ -1,10 +1,15 @@
 import { HttpError } from "./http.js";
+import { vectorize } from "./cfapi.js";
 import { chunkId } from "./store.js";
 
 const EMBED_BATCH = 16;
-const UPSERT_BATCH = 50;
+// Vectorize 单次写入上限 1000 条，留足余量避免整批失败
+const UPSERT_BATCH = 200;
 
 export async function embed(env, texts) {
+  if (!env.AI) {
+    throw new HttpError(503, "Worker 没有 AI 绑定", { hint: "检查 wrangler.jsonc 是否保留 ai = { binding: \"AI\" }，并重新部署" });
+  }
   const vectors = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
@@ -25,45 +30,44 @@ function assertDimensions(env, vector) {
   if (expected && vector.length !== expected) {
     throw new HttpError(
       500,
-      `向量维度不匹配：模型 ${env.EMBEDDING_MODEL} 输出 ${vector.length} 维，配置与 Vectorize 索引是 ${expected} 维`,
+      `向量维度不匹配：模型 ${env.EMBEDDING_MODEL} 输出 ${vector.length} 维，但配置与向量索引是 ${expected} 维`,
       {
         hint: [
-          `1) 用实际维度新建索引：npx wrangler vectorize create rag-kb-index-${vector.length}d --dimensions=${vector.length} --metric=cosine --binding=VECTORIZE --update-config`,
-          `2) 把 wrangler.jsonc 里的 EMBEDDING_DIMENSIONS 改成 ${vector.length}`,
-          "3) 换模型或改维度后需要重新上传文档入库",
+          `1) 把 wrangler.jsonc 里的 EMBEDDING_DIMENSIONS 改成 ${vector.length}`,
+          `2) 换维度需要重建索引：控制台删除 ${env.INDEX_NAME} 后点“初始化资源”`,
+          "3) 之后把文档删掉重新入库（向量无法迁移）",
         ],
       }
     );
   }
 }
 
-export async function upsertVectors(env, items) {
-  for (let i = 0; i < items.length; i += UPSERT_BATCH) {
-    const result = await env.VECTORIZE.upsert(items.slice(i, i + UPSERT_BATCH));
-    if (result?.error) throw new HttpError(502, `向量写入失败：${result.error}`);
-  }
-}
-
 export async function indexDocument(env, docId, chunks) {
   const vectors = await embed(env, chunks);
-  const items = vectors.map((values, ordinal) => ({
+  const items = chunks.map((values, ordinal) => ({
     id: chunkId(docId, ordinal),
-    values,
+    values: vectors[ordinal],
     metadata: { docId, ordinal },
   }));
-  await upsertVectors(env, items);
-  return { count: items.length, model: env.EMBEDDING_MODEL, dimensions: vectors[0]?.length ?? 0 };
+  const mutations = [];
+  for (let i = 0; i < items.length; i += UPSERT_BATCH) {
+    const result = await vectorize.upsert(env, env.INDEX_NAME, items.slice(i, i + UPSERT_BATCH));
+    if (result?.error) throw new HttpError(502, `向量写入失败：${result.error}`);
+    if (result?.mutationId) mutations.push(result.mutationId);
+  }
+  // Vectorize 写入是异步排队的，mutation 生效前检索可能查不到刚入库的片段
+  return { count: items.length, model: env.EMBEDDING_MODEL, dimensions: vectors[0]?.length ?? 0, mutations };
 }
 
 export async function deleteVectors(env, ids) {
   for (let i = 0; i < ids.length; i += UPSERT_BATCH) {
-    await env.VECTORIZE.deleteByIds(ids.slice(i, i + UPSERT_BATCH));
+    await vectorize.deleteByIds(env, env.INDEX_NAME, ids.slice(i, i + UPSERT_BATCH));
   }
 }
 
 export async function searchChunkIds(env, question, topK) {
   const [queryVector] = await embed(env, [question]);
-  const response = await env.VECTORIZE.query(queryVector, { topK, returnMetadata: true });
-  const matches = response?.matches ?? response?.result?.matches ?? [];
-  return matches.filter((m) => m?.id && m?.score > 0).map((m) => ({ id: m.id, score: m.score }));
+  const result = await vectorize.query(env, env.INDEX_NAME, queryVector, { topK });
+  const matches = result?.matches ?? result?.result?.matches ?? [];
+  return matches.filter((match) => match?.id && match?.score > 0).map((match) => ({ id: match.id, score: match.score }));
 }

@@ -18,7 +18,7 @@ export function fail(error) {
   console.error("unhandled", error);
   const message = error?.message || String(error);
   if (/not found|does not exist/i.test(message)) {
-    return json({ error: `Cloudflare 侧资源未找到：${message}`, hint: "请先运行 npm run setup 创建 D1 数据库与 Vectorize 索引" }, 500);
+    return json({ error: `Cloudflare 侧资源未找到：${message}`, hint: "在页面点“初始化资源”（POST /api/admin/setup）自动创建 D1 与 Vectorize 索引" }, 500);
   }
   return json({ error: `服务内部错误：${message}` }, 500);
 }
@@ -82,7 +82,14 @@ export function validateTextField(text, maxChars) {
 
 export async function requireAuth(request, env) {
   const token = env.ADMIN_TOKEN;
-  if (!token) return;
+  if (!token) {
+    throw new HttpError(403, "服务尚未配置访问令牌", {
+      hint: [
+        "这个 Worker 持有可创建/删除资源的 Cloudflare API Token，因此强制要求令牌后才开放接口",
+        "在 Workers 控制台 Settings → Variables and Secrets 添加 Secret：ADMIN_TOKEN（自定义一个长随机串），重新部署或等待生效后再刷新页面",
+      ],
+    });
+  }
   const header = request.headers.get("authorization") || "";
   const provided = header.startsWith("Bearer ") ? header.slice(7) : header;
   if (!(await safeEqual(String(token), String(provided)))) {
