@@ -102,7 +102,9 @@ function renderSources(target, sources) {
     title.textContent = source.title;
     const score = document.createElement("span");
     score.className = "muted";
-    score.textContent = `相似度 ${source.score} · 第 ${Number(source.ordinal) + 1} 段`;
+    const chunks = source.chunks ? `片段 ${source.chunks.join("、")}` : `第 ${Number(source.ordinal) + 1} 段`;
+    const lexical = typeof source.lexical === "number" ? ` · 关键词命中 ${Math.round(source.lexical * 100)}%` : "";
+    score.textContent = `相似度 ${source.score}${lexical} · ${chunks}`;
     head.append(num, title, score);
 
     const excerpt = document.createElement("div");
@@ -238,8 +240,7 @@ async function submitAsk() {
     renderAnswer($("answer"), data.answer, data.sources.length);
     renderSources($("sources"), data.sources);
     $("askResult").classList.remove("hidden");
-    $("askHint").textContent = `召回 ${data.sources.length} 个片段 · ${data.timings.totalMs} ms`;
-    setBusy(false, $("askHint"));
+    setBusy(false, $("askHint"), `候选 ${data.timings.candidates} 个片段 → 采用 ${data.sources.length} 个来源 · ${data.timings.totalMs} ms${data.noContext ? " · 没有足够相关的资料" : ""}`);
   } catch (error) {
     toast(error.message, true);
     setBusy(false, $("askHint"));

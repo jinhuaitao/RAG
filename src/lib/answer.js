@@ -3,23 +3,48 @@ import { HttpError } from "./http.js";
 const SYSTEM_PROMPT = `你是一个严格依据知识库回答的助手。
 规则：
 1. 只使用【参考资料】中的信息作答，禁止用你自己的知识补充事实。
-2. 每一处引用事实都在句末标注来源编号，例如 [1]、[2]。
-3. 参考资料无法回答时，直接回答“知识库中没有相关信息”，并说明缺少哪部分信息，不要编造。
-4. 资料之间存在冲突时，指出冲突并分别给出编号来源。
-5. 用与提问相同的语言回答，条理清晰，控制在 500 字以内。`;
+2. 资料里没有出现过的数字、日期、金额、名称、条款号，一个字都不许写。
+3. 每一处引用事实都在句末标注来源编号，例如 [1]、[2]。
+4. 参考资料无法回答时，直接回答“知识库中没有相关信息”，并说明缺少哪部分信息，不要编造、不要猜测。
+5. 资料之间存在冲突时，指出冲突并分别给出编号来源。
+6. 用与提问相同的语言回答，条理清晰，控制在 500 字以内。`;
 
-function buildContext(passages, maxChars) {
-  let used = 0;
-  const picked = [];
+// 同一篇文档的多个片段并成一个来源块：编号对应文档而不是片段，
+// 免得模型把同一段内容当成两条互相印证的独立证据
+function groupByDocument(passages) {
+  const groups = new Map();
   for (const passage of passages) {
-    if (used + passage.content.length > maxChars && picked.length >= 2) break;
-    picked.push(passage);
-    used += passage.content.length;
+    if (!groups.has(passage.docId)) groups.set(passage.docId, []);
+    groups.get(passage.docId).push(passage);
   }
-  return picked.map((p, i) => `【${i + 1}】《${p.title}》\n${p.content}`).join("\n\n---\n\n");
+  return [...groups.values()]
+    .map((items) => items.sort((a, b) => a.ordinal - b.ordinal))
+    .sort((a, b) => b[0].score - a[0].score);
 }
 
-export async function generateAnswer(env, { question, passages }) {
+function buildContext(groups, maxChars) {
+  let used = 0;
+  const kept = [];
+  for (const group of groups) {
+    const passages = [];
+    for (const passage of group) {
+      if (used + passage.content.length > maxChars && kept.length + passages.length >= 1) break;
+      passages.push(passage);
+      used += passage.content.length;
+    }
+    if (passages.length) kept.push(passages);
+    if (used >= maxChars) break;
+  }
+  const text = kept
+    .map(
+      (passages, i) =>
+        `【${i + 1}】《${passages[0].title}》（片段 ${passages.map((p) => p.ordinal + 1).join("、")}）\n${passages.map((p) => p.content).join("\n\n")}`
+    )
+    .join("\n\n---\n\n");
+  return { blocks: kept, text };
+}
+
+export async function generateAnswer(env, { question, passages, terms = [] }) {
   if (!passages.length) {
     return {
       answer: "知识库中没有相关信息。请先在“知识库管理”里上传或粘贴文档，再来提问。",
@@ -27,10 +52,12 @@ export async function generateAnswer(env, { question, passages }) {
       empty: true,
     };
   }
-  const context = buildContext(passages, Number(env.MAX_CONTEXT_CHARS) || 12_000);
+  const maxChars = Number(env.MAX_CONTEXT_CHARS) || 12_000;
+  const { blocks, text } = buildContext(groupByDocument(passages), maxChars);
+  const focus = terms.length ? `\n【重点词】${terms.map((entry) => entry.term).join("、")}` : "";
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: `【参考资料】\n${context}\n\n【问题】\n${question}` },
+    { role: "user", content: `【参考资料】\n${text}\n\n【问题】\n${question}${focus}` },
   ];
 
   let response;

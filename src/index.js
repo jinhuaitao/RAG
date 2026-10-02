@@ -2,12 +2,14 @@ import { fail, HttpError, json, readIngest, readJson, requireAuth, validateTextF
 import { chunkText, extractText } from "./lib/chunk.js";
 import { cleanText } from "./lib/clean.js";
 import { grabUrl } from "./lib/grab.js";
-import { countAll, deleteDocumentRows, getChunkRows, listChunkIds, listDocuments, requireDocument, saveDocument } from "./lib/store.js";
+import { countAll, deleteDocumentRows, getChunkRows, keywordCandidates, listChunkIds, listDocuments, requireDocument, saveDocument } from "./lib/store.js";
 import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
+import { extractTerms, lexicalScore, rankCandidates, stripOverlap } from "./lib/rank.js";
 import { generateAnswer } from "./lib/answer.js";
 import { initialize, provisionStatus } from "./lib/setup.js";
 
 const TOP_K_LIMIT = 20;
+const RECALL_POOL_MAX = 24;
 
 export default {
   async fetch(request, env) {
@@ -127,28 +129,40 @@ async function ask(env, request) {
   const topK = Math.min(TOP_K_LIMIT, Math.max(1, Number.isFinite(requested) && requested > 0 ? Math.round(requested) : Number(env.TOP_K) || 6));
 
   const started = Date.now();
-  const hits = await searchChunkIds(env, question, topK);
-  const rows = await getChunkRows(env, hits.map((hit) => hit.id));
-  const passages = hits
-    .map((hit) => {
-      const row = rows.get(hit.id);
-      return row ? { docId: row.doc_id, title: row.title, ordinal: row.ordinal, content: row.content, score: hit.score } : null;
-    })
-    .filter(Boolean);
+  const terms = extractTerms(question);
+  const pool = Math.min(RECALL_POOL_MAX, Math.max(topK * 4, 8));
+  // 两路召回同时进行：向量负责同义改写，LIKE 关键词负责专有名词、数字与日期，然后在本地重排
+  const [vectorHits, keywordHits] = await Promise.all([searchChunkIds(env, question, pool), keywordCandidates(env, terms, pool)]);
 
-  const result = await generateAnswer(env, { question, passages });
+  const candidateIds = [...new Set([...vectorHits.map((hit) => hit.id), ...keywordHits.map((hit) => hit.id)])];
+  const rows = await getChunkRows(env, candidateIds);
+  const ranked = stripOverlap(
+    rankCandidates({ vectorHits, keywordHits, rows, terms, limit: topK })
+  );
+
+  const timings = { totalMs: Date.now() - started, candidates: candidateIds.length };
+  if (!ranked.length) {
+    // 与其让模型硬答，不如直接说明没命中，并告诉用户怎么问才命中
+    const best = Math.max(0, ...[...rows.values()].map((row) => lexicalScore(terms, row.content)));
+    return json({
+      question,
+      answer: rows.size
+        ? `知识库中没有足够相关的资料来回答这个问题：检索到 ${rows.size} 个候选片段，最高关键词命中 ${Math.round(best * 100)}%，语义相似度也不够。\n可以试试：① 换成文档里出现过的说法；② 在提问里带上具体名词或数字；③ 确认相关资料是否已入库。`
+        : "知识库里没有任何片段与这个问题相关。请先在「知识库管理」里上传、粘贴文档或填入网址，再换一种提问角度。",
+      sources: [],
+      timings,
+      noContext: true,
+      terms: terms.map((entry) => entry.term),
+    });
+  }
+
+  const result = await generateAnswer(env, { question, passages: ranked, terms });
   return json({
     question,
     answer: result.answer,
-    sources: passages.map((passage, index) => ({
-      index: index + 1,
-      docId: passage.docId,
-      title: passage.title,
-      ordinal: passage.ordinal,
-      score: Number(passage.score.toFixed(4)),
-      excerpt: passage.content.slice(0, 300),
-    })),
-    timings: { totalMs: Date.now() - started },
-    noContext: result.empty === true,
+    sources: result.used,
+    timings,
+    noContext: false,
+    terms: terms.map((entry) => entry.term),
   });
 }

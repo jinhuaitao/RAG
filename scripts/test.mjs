@@ -4,6 +4,7 @@ import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
+import { combinedScore, extractTerms, keywordSql, lexicalScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 
 const cases = [];
 function test(name, fn) {
@@ -215,6 +216,67 @@ test("网址抓取：网页正文经清洗与切片后可正常检索", () => {
 
 test("网址抓取：非 HTML 文本按原样保留", () => {
   assert.equal(htmlToText("纯文本，没有标签。"), "纯文本，没有标签。");
+});
+
+test("检索：中文按双字取词，长词权重更高，英文与数字单独成词", () => {
+  const terms = extractTerms("退货申请需要在几天内提交？refund 要 3-5 工作日");
+  const byTerm = new Map(terms.map((entry) => [entry.term, entry.weight]));
+  assert.ok(byTerm.has("退货") && byTerm.has("申请"), [...byTerm.keys()].join(","));
+  assert.ok(byTerm.get("退货申请") > byTerm.get("退货"), "长词权重应更高");
+  assert.equal(byTerm.get("refund"), 2);
+  assert.ok(byTerm.has("3-5") || byTerm.has("3"), "数字要参与检索");
+  assert.ok(![...byTerm.keys()].some((term) => term.includes("？")), "标点不进检索词");
+});
+
+test("检索：关键词覆盖率区分「踩中原文」与「只是话题相近」", () => {
+  const terms = extractTerms("退款到账要几个工作日");
+  const exact = lexicalScore(terms, "退款到账时间取决于发卡银行，通常为 3–5 个工作日。");
+  const vague = lexicalScore(terms, "我们的售后体系完善，客户满意度长期保持在行业领先水平。");
+  assert.ok(exact > vague * 2, `exact=${exact} vague=${vague}`);
+  assert.ok(vague < 0.2, vague);
+});
+
+test("检索：LIKE 关键词查询转义通配符且全部走占位符", () => {
+  const { sql, params } = keywordSql(extractTerms("折扣 30% 与 A_B 型号"), 24);
+  assert.equal((sql.match(/\?/g) || []).length, params.length);
+  assert.ok(!params.some((p) /[';]|--/.test(p)), params.join("|"));
+  assert.ok(params.every((p) => p.startsWith("%") && p.endsWith("%")));
+  assert.ok(/3\\%/.test(params.join("|")), `未转义的 % 会匹配任意内容：${params.join("|")}`);
+  assert.ok(/ESCAPE/.test(sql) && /LIMIT 24/.test(sql));
+});
+
+test("检索：向量与关键词合并重排，弱相关片段被挡在门外", () => {
+  const terms = extractTerms("发票开错的作废重开流程");
+  const rows = new Map([
+    ["a-1", { id: "a-1", doc_id: "a", title: "财务手册", ordinal: 1, content: "发票开错需要作废重开，先提交作废申请再由税务岗开票。" }],
+    ["a-2", { id: "a-2", doc_id: "a", title: "财务手册", ordinal: 2, content: "公司一贯重视财务合规，报销单据需leader签字。" }],
+    ["b-9", { id: "b-9", doc_id: "b", title: "团建通知", ordinal: 9, content: "本周六爬山，请穿运动鞋。" }],
+  ]);
+  const ranked = rankCandidates({
+    vectorHits: [
+      { id: "a-2", score: 0.8 },
+      { id: "a-1", score: 0.72 },
+      { id: "b-9", score: 0.6 },
+    ],
+    keywordHits: [{ id: "a-1", hits: 4 }],
+    rows,
+    terms,
+    limit: 6,
+  });
+  assert.equal(ranked[0].id ?? ranked[0].docId + ranked[0].ordinal, "a1", "踩中关键词的片段应排在只话题相近的前面");
+  assert.ok(ranked.every((p) => !(p.docId === "b" && p.lexical < 0.12 && p.vector < 0.45)), "语义一般又零关键词命中的不该进上下文");
+  assert.ok(combinedScore(0.7, 0) > combinedScore(0.3, 0.9) === false, "关键词权重要高于语义分");
+});
+
+test("检索：同篇相邻片段的重叠尾巴不再重复喂给模型", () => {
+  const passages = [
+    { docId: "a", ordinal: 1, title: "手册", content: "第一段内容，讲的是开票时效与作废规则，结尾在此", score: 0.9, lexical: 0.5 },
+    { docId: "a", ordinal: 2, title: "手册", content: "开票时效与作废规则，结尾在此\n第二段内容，讲的是红字确认单，长度足够不被过滤掉。", score: 0.8, lexical: 0.4 },
+  ];
+  const stripped = stripOverlap(passages);
+  assert.equal(stripped.length, 2);
+  assert.ok(!stripped[1].content.startsWith("开票时效"), stripped[1].content);
+  assert.ok(stripped[1].content.includes("红字确认单"));
 });
 
 let failed = 0;

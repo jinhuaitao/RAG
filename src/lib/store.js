@@ -1,5 +1,6 @@
 import { d1 } from "./cfapi.js";
 import { HttpError } from "./http.js";
+import { keywordSql } from "./rank.js";
 
 let cachedUuid = null;
 
@@ -76,6 +77,13 @@ export async function getChunkRows(env, ids) {
 export async function listChunkIds(env, docId) {
   const rows = await run(env, "SELECT id FROM chunks WHERE doc_id = ? ORDER BY ordinal", [docId]);
   return rows.map((row) => row.id);
+}
+
+// 关键词召回：向量检索容易漏掉专有名词、数字与日期，这里用 LIKE 在整个库里捞一遍
+export async function keywordCandidates(env, terms, limit = 24) {
+  if (!terms.length) return [];
+  const { sql, params } = keywordSql(terms, limit);
+  return run(env, sql, params);
 }
 
 export async function countAll(env) {
