@@ -220,6 +220,7 @@ const env = {
   EMBEDDING_DIMENSIONS: String(DIMENSIONS),
   EMBEDDING_METRIC: "cosine",
   CHAT_MODEL: process.env.CHAT_MODEL || "@cf/mock/llama",
+  CHAT_MAX_TOKENS: "1500",
   TOP_K: "6",
   CHUNK_MAX_CHARS: "600",
   CHUNK_OVERLAP_CHARS: "120",

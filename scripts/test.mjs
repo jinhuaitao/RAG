@@ -5,6 +5,7 @@ import { chunkText, detectHeading, extractText, normalizeText } from "../src/lib
 import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
+import { generateAnswer } from "../src/lib/answer.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 
 const cases = [];
@@ -314,10 +315,54 @@ test("检索：命中专有名词的片段不会被一堆双字词稀释掉", ()
   assert.ok(overlapScore(terms, core, hit) > overlapScore(terms, core, miss) + 0.15, `${overlapScore(terms, core, hit)} vs ${overlapScore(terms, core, miss)}`);
 });
 
+const THINK_OPEN = ["<", "think", ">"].join("");
+const THINK_CLOSE = ["<", "/", "think", ">"].join("");
+const RAG_PASSAGE = [{ docId: "a", title: "退货政策", ordinal: 0, content: "退货申请需要在签收后七天内提交，逾期不再受理。", score: 0.9, vector: 0.82, lexical: 0.7 }];
+
+test("生成：推理模型的思考块不显示给用户，输出上限读配置", async () => {
+  const sent = {};
+  const env = {
+    CHAT_MODEL: "@cf/mock/r1",
+    MAX_CONTEXT_CHARS: "12000",
+    CHAT_MAX_TOKENS: "1500",
+    AI: {
+      run: async (model, inputs) => {
+        Object.assign(sent, inputs);
+        return { response: `${THINK_OPEN}先找期限再算天数${THINK_CLOSE}\n\n签收后七天内提交。[1]` };
+      },
+    },
+  };
+  const result = await generateAnswer(env, { question: "退货要几天内提交？", passages: RAG_PASSAGE, terms: [{ term: "退货申请", weight: 5 }] });
+  assert.equal(result.answer, "签收后七天内提交。[1]", result.answer);
+  assert.equal(sent.max_tokens, 1500, "上限要读 CHAT_MAX_TOKENS，默认值不够推理模型用");
+  assert.equal(sent.messages[1].content.includes("【重点词】退货申请"), true, "重点词进提示");
+  assert.deepEqual(result.used[0].chunks, [1], "来源片段号从 1 开始，与参考资料里的编号一致");
+});
+
+test("生成：思考过程被截断时报错引导调额度，而不是把思考当答案", async () => {
+  const env = { CHAT_MODEL: "@cf/mock/r1", MAX_CONTEXT_CHARS: "12000", AI: { run: async () => ({ response: `${THINK_OPEN}一路推下去还没写完` }) } };
+  let thrown;
+  try {
+    await generateAnswer(env, { question: "逾期怎么办？", passages: RAG_PASSAGE, terms: [] });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown?.status, 502, JSON.stringify(thrown?.message));
+  assert.ok(String(JSON.stringify(thrown.details)).includes("CHAT_MAX_TOKENS"), JSON.stringify(thrown.details));
+});
+
+test("生成：没有片段时不调用模型", async () => {
+  let called = 0;
+  const env = { CHAT_MODEL: "@cf/mock/r1", AI: { run: async () => (called += 1, { response: "不该被调用" }) } };
+  const result = await generateAnswer(env, { question: "随便问", passages: [], terms: [] });
+  assert.equal(called, 0);
+  assert.equal(result.empty, true);
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {
-    fn();
+    await fn();
     console.log(`✓ ${name}`);
   } catch (error) {
     failed += 1;

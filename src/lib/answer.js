@@ -63,8 +63,9 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
   ];
 
   let response;
+  const maxTokens = Math.min(4096, Number(env.CHAT_MAX_TOKENS) || 900);
   try {
-    response = await env.AI.run(env.CHAT_MODEL, { messages, temperature: 0.2, max_tokens: 900 });
+    response = await env.AI.run(env.CHAT_MODEL, { messages, temperature: 0.2, max_tokens: maxTokens });
   } catch (error) {
     const message = String(error?.message ?? error);
     if (/deprecat/i.test(message)) {
@@ -97,9 +98,27 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
     throw new HttpError(502, `生成模型调用失败：${message}`);
   }
 
-  const answer = response?.response ?? response?.result?.response;
-  if (typeof answer !== "string") {
+  const raw = response?.response ?? response?.result?.response ?? response?.reasoning_content ?? response?.result?.reasoning_content;
+  if (typeof raw !== "string" || !raw.trim()) {
     throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 返回格式异常`, { raw: JSON.stringify(response).slice(0, 400) });
+  }
+  // 推理模型把思考过程混在正文里返回：Cloudflare 的输出结构没有单独的 reasoning 字段，
+  // 只能在文本里找思考块标记（拼出来是为了避开标签字面量被工具层吃掉），取结束标记之后的部分当答案
+  const open = ["<", "think", ">"].join("");
+  const close = ["<", "/", "think", ">"].join("");
+  const end = raw.lastIndexOf(close);
+  if (end < 0 && raw.includes(open)) {
+    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 的思考过程没写完就被截断，正文为空`, {
+      hint: [
+        "思考过程的 token 也算在 CHAT_MAX_TOKENS 里，当前配置是 " + maxTokens,
+        "把 wrangler.jsonc 的 CHAT_MAX_TOKENS 调到 2500–3000 再部署试试（无需改代码）",
+        "提示里已限制 500 字，但思考长度仍由模型自己决定",
+      ],
+    });
+  }
+  const answer = (end < 0 ? raw : raw.slice(end + close.length).replace(/^[\s:：]+/, "")).trim();
+  if (!answer) {
+    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 的思考过程之后没有正文`, { hint: `调大 wrangler.jsonc 的 CHAT_MAX_TOKENS（当前 ${maxTokens}）后重试` });
   }
   const used = blocks.map((group, index) => ({
     index: index + 1,
