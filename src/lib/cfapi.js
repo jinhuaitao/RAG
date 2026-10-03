@@ -108,20 +108,31 @@ export const d1 = {
     return payload?.results ?? [];
   },
 
-  // 多条语句放进一次请求：D1 的 /query 认数组请求体，服务端按一个隐式事务顺序执行。
-  // 逐条 query() 会把「一次入库」变成「N 个子请求」，免费版 50 个的额度撑不住一篇网页。
+  // 多条语句放进一次请求，避开「一个片段一个子请求」把 Worker 的子请求额度吃光。
+  // 公开 REST 的 /query 请求体只有两个合法分支：{sql, params} 或 {batch:[{sql, params}]}；
+  // workerd 内部绑定发的裸数组在这里会被拒：「Invalid input: Expected object, received array」。
+  // SQL 出错时服务端仍回 HTTP 200，靠 success:false 判断，所以 400 只可能是请求体没过 schema。
   async batch(env, uuid, statements) {
-    const result = await d1Post(env, uuid, statements);
-    const payloads = Array.isArray(result) ? result : [result];
-    if (payloads.length !== statements.length) {
-      throw new HttpError(502, `D1 批量写入返回了 ${payloads.length} 条结果，但发出了 ${statements.length} 条语句，无法确认哪些已写入`, {
-        hint: "这批语句在一个事务里执行，失败时通常全部回滚；请到 D1 控制台核对 documents/chunks 表后重新入库",
+    try {
+      const result = await d1Post(env, uuid, { batch: statements });
+      const payloads = Array.isArray(result) ? result : [result];
+      if (payloads.length !== statements.length) {
+        throw new HttpError(502, `D1 批量写入返回了 ${payloads.length} 条结果，但发出了 ${statements.length} 条语句，无法确认哪些已写入`, {
+          hint: "这批语句在一个事务里执行，失败时通常全部回滚；请到 D1 控制台核对 documents/chunks 表后重新入库",
+        });
+      }
+      payloads.forEach((payload, index) => {
+        checkStatement(payload, index === 0 ? statements[0].sql : `第 ${index + 1}/${statements.length} 条语句：${statements[index].sql.slice(0, 80)}`);
       });
+      return { batched: true };
+    } catch (error) {
+      if (error.status !== 400) throw error;
+      const results = [];
+      for (const statement of statements) {
+        results.push(await d1.query(env, uuid, statement.sql, statement.params));
+      }
+      return { batched: false, reason: error.message, results };
     }
-    payloads.forEach((payload, index) => {
-      checkStatement(payload, index === 0 ? statements[0].sql : `第 ${index + 1}/${statements.length} 条语句：${statements[index].sql.slice(0, 80)}`);
-    });
-    return payloads.map((payload) => payload?.results ?? []);
   },
 };
 

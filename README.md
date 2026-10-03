@@ -145,7 +145,7 @@ curl -s -X POST https://rag-kb.<子域>.workers.dev/api/admin/setup \
 - **重定向逐跳复验**：最多跟 3 跳，每一跳的 `Location` 都重新过一遍上面的校验，防止「公网地址 302 到内网」。
 - **大小限制**：先看 `Content-Length`，再边读边累计，超过 `FETCH_MAX_BYTES`（默认 800 KB）立即中断连接并返回 413，不会被超大页面吃满内存。
 - **只收文本**：返回 PDF / Word / 图片 / `octet-stream` 一律 415；非 2xx 会翻成中文提示（401/403 → 需要登录或反爬，建议复制正文；404 → 页面不存在；429 → 被限流）。
-- **写入合批**：抓一页几十个片段也只发一两次 D1 请求（多行 `INSERT` + batch），避免吃满 Worker 的子请求额度；上限与调法见[常见问题](#常见问题)里的 `Too many subrequests`。
+- **写入合批**：抓一页几十个片段也只发一次 D1 请求（多行 `INSERT` + `{batch: […]}`），避免吃满 Worker 的子请求额度；万一这个端点不接受批量，会自动退回逐条并在响应里带 `d1Sequential`。上限与调法见[常见问题](#常见问题)里的 `Too many subrequests`。
 
 已知限制：靠 JavaScript 渲染的页面（SPA、需滚动加载的正文）抓不到内容，返回 422 并提示改用「粘贴正文」；需要登录的站点抓不到；Workers 无法在抓取前做 DNS 解析，所以理论上存在 DNS rebinding（域名先解析成公网、请求时改指内网）与 `1.2.3.4.nip.io` 这类把内网 IP 编进域名的服务，若知识库开放给他人使用，建议给 Worker 加上 Access。
 
@@ -313,6 +313,9 @@ Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` �
 
 **报「思考过程没写完就被截断，正文为空」，或者回答里混着一大段推理过程**
 默认的生成模型是推理模型，它会先输出一段思考文本，再给正文，而思考的 token 也算在 `CHAT_MAX_TOKENS`（默认 1500）里。思考太长就会被截断成「只有思考、没有正文」——这时按报错里的提示把 `CHAT_MAX_TOKENS` 调到 2500–3000。正常情况下 Worker 会把思考块剥掉再显示，只留正文；如果你换回非推理模型（llama 系），这个字段设回 900 就够了。
+
+**D1 或 Cloudflare API 报 `Invalid input: Expected object, received array`**
+D1 的公开 REST 端点 `POST /accounts/{account_id}/d1/database/{uuid}/query` 只认两种请求体：`{sql, params}` 或 `{batch: [{sql, params}, …}]`，**顶层必须是对象**。Cloudflare 自己的 workerd 内部绑定发的是裸数组，那是绑定格式，照搬到 REST 就会被拒。本项目已按 `{batch: […]}` 合批写入；如果响应里出现 `d1Sequential` 字段，说明这个端点在你的账号上仍拒批量请求体，Worker 会自动退回逐条执行——功能不受影响，只是每次入库多占几个子请求（子请求额度见上一条）。
 
 **入库（尤其是网址抓取）报「单个 Worker 调用的子请求数已达上限」/ `Too many subrequests by single Worker invocation`**
 Workers 每次请求能发起的**外部调用（子请求）**是有硬额度的：免费版 50 个、付费版 1000 个。一次入库要发的子请求数 ≈ `1（抓页面）+ 片段数 ÷ 16（嵌入）+ 片段数 ÷ 50（写向量）+ 若干（写 D1）`，所以一篇几百片段的长文档在免费版会撞墙。代码侧已经把 D1 写入合批（多行 `VALUES` + 一次 batch 请求，60 个片段从 61 次请求降到 1 次），仍然超限时的办法：

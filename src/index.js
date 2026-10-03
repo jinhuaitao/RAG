@@ -98,7 +98,15 @@ async function create(env, request) {
   if (!chunks.length) throw new HttpError(400, "切片后没有可用内容，请检查文档是否为空或全为二进制内容");
 
   const docId = crypto.randomUUID();
-  await saveDocument(env, { docId, title, origin: input.origin, text: cleaned.text, chunks });
+  // documents 行与全部 chunks 行一次请求写入；写失败时把半截的片段清掉，
+  // 否则会留下没有 documents 行的孤儿片段——列表里看不到，也就再也删不掉
+  let stored;
+  try {
+    stored = await saveDocument(env, { docId, title, origin: input.origin, text: cleaned.text, chunks });
+  } catch (error) {
+    await deleteDocumentRows(env, docId).catch(() => {});
+    throw error;
+  }
 
   let indexed;
   try {
@@ -108,15 +116,33 @@ async function create(env, request) {
     throw error;
   }
 
-  return json({ ok: true, docId, title, origin: input.origin, sourceUrl, chunkCount: chunks.length, cleaned: cleaned.stats, embedding: indexed }, 201);
+  return json(
+    {
+      ok: true,
+      docId,
+      title,
+      origin: input.origin,
+      sourceUrl,
+      chunkCount: chunks.length,
+      cleaned: cleaned.stats,
+      embedding: indexed,
+      ...(stored.batched ? {} : { d1Sequential: `D1 未接受批量请求体，已退回逐条写入：${stored.reason}` }),
+    },
+    201
+  );
 }
 
 async function remove(env, docId) {
   await requireDocument(env, docId);
   const ids = await listChunkIds(env, docId);
   await deleteVectors(env, ids);
-  await deleteDocumentRows(env, docId);
-  return json({ ok: true, docId, deletedChunks: ids.length });
+  const stored = await deleteDocumentRows(env, docId);
+  return json({
+    ok: true,
+    docId,
+    deletedChunks: ids.length,
+    ...(stored.batched ? {} : { d1Sequential: `D1 未接受批量请求体，已退回逐条删除：${stored.reason}` }),
+  });
 }
 
 async function ask(env, request) {

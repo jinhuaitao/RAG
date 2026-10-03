@@ -67,23 +67,37 @@ export function chunkInsertStatements(docId, chunks) {
   return statements;
 }
 
-async function runBatch(env, statements) {
-  const uuid = await databaseUuid(env);
+// 把语句切成「一次请求一组」，受单次请求的体积与条数上限约束
+export function groupStatements(statements) {
+  const groups = [];
   let group = [];
   let groupBytes = 0;
-  const send = async () => {
-    if (!group.length) return;
-    await d1.batch(env, uuid, group);
-    group = [];
-    groupBytes = 0;
-  };
   for (const statement of statements) {
     const size = statementSize(statement);
-    if (group.length && (groupBytes + size > MAX_BATCH_BYTES || group.length >= MAX_BATCH_STATEMENTS)) await send();
+    if (group.length && (groupBytes + size > MAX_BATCH_BYTES || group.length >= MAX_BATCH_STATEMENTS)) {
+      groups.push(group);
+      group = [];
+      groupBytes = 0;
+    }
     group.push(statement);
     groupBytes += size;
   }
-  await send();
+  if (group.length) groups.push(group);
+  return groups;
+}
+
+async function runBatch(env, statements) {
+  const uuid = await databaseUuid(env);
+  let batched = true;
+  let reason = "";
+  for (const group of groupStatements(statements)) {
+    const result = await d1.batch(env, uuid, group);
+    if (!result.batched) {
+      batched = false;
+      reason = result.reason;
+    }
+  }
+  return { batched, reason };
 }
 
 export function chunkId(docId, ordinal) {
@@ -91,7 +105,7 @@ export function chunkId(docId, ordinal) {
 }
 
 export async function saveDocument(env, { docId, title, origin, text, chunks }) {
-  await runBatch(env, [
+  return runBatch(env, [
     {
       sql: "INSERT INTO documents (id, title, origin, char_count, chunk_count) VALUES (?, ?, ?, ?, ?)",
       params: [docId, title, origin, text.length, chunks.length],
@@ -101,7 +115,7 @@ export async function saveDocument(env, { docId, title, origin, text, chunks }) 
 }
 
 export async function deleteDocumentRows(env, docId) {
-  await runBatch(env, [
+  return runBatch(env, [
     { sql: "DELETE FROM chunks WHERE doc_id = ?", params: [docId] },
     { sql: "DELETE FROM documents WHERE id = ?", params: [docId] },
   ]);

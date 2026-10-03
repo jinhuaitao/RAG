@@ -75,7 +75,8 @@ async function handleApi(req, res) {
     return send(200, envelope({ uuid, name }));
   }
 
-  // D1：执行 SQL（单个 {sql,params} 或 batch 的语句数组）
+  // D1：执行 SQL。公开 REST 的请求体只有两种合法分支：{sql, params} 与 {batch:[{sql, params}]}。
+  // 裸数组是 workerd 内部绑定的格式，真实端点会拒（MOCK_REJECT_BATCH=1 可以演这个退回路径）
   const queryMatch = path.match(/^\/d1\/database\/([0-9a-f-]{36})\/query$/);
   if (queryMatch) {
     const database = databases.get(queryMatch[1]);
@@ -89,7 +90,12 @@ async function handleApi(req, res) {
         return { success: false, error: error.message };
       }
     };
-    return send(200, envelope(Array.isArray(payload) ? payload.map(run) : run(payload)));
+    if (Array.isArray(payload) || (payload.batch && process.env.MOCK_REJECT_BATCH)) {
+      return send(400, envelope(null, [{ code: 10000, message: "Invalid input: Expected object, received array" }]));
+    }
+    if (payload.batch) return send(200, envelope(payload.batch.map(run)));
+    // 真实端点即使单条也把 result 包成数组，这里保持一致
+    return send(200, envelope([run(payload)]));
   }
 
   // Vectorize v2：索引列表 / 创建 / 获取

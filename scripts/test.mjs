@@ -7,7 +7,7 @@ import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 import { generateAnswer } from "../src/lib/answer.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
-import { chunkInsertStatements } from "../src/lib/store.js";
+import { chunkInsertStatements, groupStatements } from "../src/lib/store.js";
 
 const cases = [];
 function test(name, fn) {
@@ -346,6 +346,23 @@ test("入库：片段 INSERT 按参数与体积上限合批，一次请求写入
   assert.equal(stored[7].content, chunks[7]);
   assert.equal(stored[7].char_count, chunks[7].length);
   db.close();
+});
+
+test("入库：语句分组不超过单次请求的条数与体积上限", () => {
+  const tiny = Array.from({ length: 250 }, (_, i) => ({ sql: "SELECT ?", params: [i] }));
+  const byCount = groupStatements(tiny);
+  assert.deepEqual(byCount.map((group) => group.length), [100, 100, 50], "一次请求最多 100 条语句");
+  assert.equal(byCount.flat().length, 250);
+
+  const fat = Array.from({ length: 10 }, () => ({ sql: "INSERT INTO chunks VALUES (?)", params: ["x".repeat(90_000)] }));
+  const byBytes = groupStatements(fat);
+  assert.ok(byBytes.length > 1, "体积超限时要拆成多次请求");
+  for (const group of byBytes) {
+    const total = group.reduce((sum, statement) => sum + new TextEncoder().encode(statement.sql + statement.params.join("")).length, 0);
+    assert.ok(total <= 500_000, `单组请求体 ${total} 字节，超了`);
+  }
+  assert.equal(byBytes.flat().length, 10, "语句不能因为分组而丢失");
+  assert.equal(byBytes.flat()[9], fat[9], "顺序要保持");
 });
 
 const THINK_OPEN = ["<", "think", ">"].join("");const THINK_CLOSE = ["<", "/", "think", ">"].join("");
