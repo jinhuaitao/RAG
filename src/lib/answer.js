@@ -77,6 +77,18 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
         ],
       });
     }
+    // Workers AI 按每个模型自己的 JSON Schema 校验请求体：completion 系的老模型只有 prompt 分支，
+    // 发 messages 就会撞到 oneOf，这里直接把「换了哪个字段」说清楚
+    if (/oneOf|not met|required properties|schema/i.test(message)) {
+      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 不接受 messages 请求体：${message}`, {
+        hint: [
+          "本 Worker 用 env.AI.run 发送 { messages, temperature, max_tokens }，要求模型的 schema 里有 messages 分支",
+          "只认 prompt 的是 completion 时代的老模型（例如 @cf/meta/llama-3.2-3b-instruct、llama-2 系列），换一个对话模型即可，不用改代码",
+          "在控制台 Workers AI → 模型页用同样的 messages 试跑一次，能跑通的 ID 就能直接用",
+          "在架清单：https://developers.cloudflare.com/workers-ai/models/ 里筛 Text Generation",
+        ],
+      });
+    }
     if (/model|not found|invalid/i.test(message)) {
       throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 调用失败：${message}`, {
         hint: `登录账号后运行 npx wrangler ai models list 查看当前可用的 Text Generation 模型，把 wrangler.jsonc 里的 CHAT_MODEL 换成新的 ID（无需改代码）`,

@@ -17,15 +17,20 @@
     "ACCOUNT_ID": "",
     "DB_NAME": "rag-kb-db",
     "INDEX_NAME": "rag-kb-index",
-    "EMBEDDING_MODEL": "@cf/meta/llama-3.1-8b-instruct-fp8",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3",
     "EMBEDDING_DIMENSIONS": "1024",
     "EMBEDDING_METRIC": "cosine",
-    "CHAT_MODEL": "@cf/meta/llama-3.1-8b-instruct-fp8",
+    // 必须是 schema 里有 messages 分支的对话模型；completion 系的老模型（如 @cf/meta/llama-3.2-3b-instruct）只认 prompt，
+    // 用 env.AI.run 发 messages 会得到 5006 oneOf not met
+    "CHAT_MODEL": "@cf/nvidia/nemotron-3-120b-a12b",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",
     "CHUNK_OVERLAP_CHARS": "120",
     "MAX_DOC_CHARS": "200000",
-    "MAX_CONTEXT_CHARS": "12000"
+    "MAX_CONTEXT_CHARS": "12000",
+    "FETCH_TIMEOUT_MS": "8000",
+    "FETCH_MAX_BYTES": "800000",
+    "ALLOW_PRIVATE_URLS": "false"
   },
   "observability": {
     "enabled": true
