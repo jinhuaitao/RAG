@@ -75,17 +75,20 @@ async function handleApi(req, res) {
     return send(200, envelope({ uuid, name }));
   }
 
-  // D1：执行 SQL
+  // D1：执行 SQL（单个 {sql,params} 或 batch 的语句数组）
   const queryMatch = path.match(/^\/d1\/database\/([0-9a-f-]{36})\/query$/);
   if (queryMatch) {
     const database = databases.get(queryMatch[1]);
     if (!database) return send(404, envelope(null, [{ code: 7001, message: "Database not found" }]));
-    const { sql, params = [] } = JSON.parse(body || "{}");
-    try {
-      return send(200, envelope({ success: true, meta: { changes: 0 }, results: database.sqlite.prepare(sql).all(...params) }));
-    } catch (error) {
-      return send(200, envelope({ success: false, errors: [{ message: error.message }], results: [], meta: {} }));
-    }
+    const payload = JSON.parse(body || "{}");
+    const run = ({ sql, params = [] }) => {
+      try {
+        return { success: true, meta: { changes: 0 }, results: database.sqlite.prepare(sql).all(...params) };
+      } catch (error) {
+        return { success: false, errors: [{ message: error.message }], results: [], meta: {} };
+      }
+    };
+    return send(200, envelope(Array.isArray(payload) ? payload.map(run) : run(payload)));
   }
 
   // Vectorize v2：索引列表 / 创建 / 获取

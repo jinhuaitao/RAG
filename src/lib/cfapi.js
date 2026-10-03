@@ -52,7 +52,18 @@ async function call(env, path, { method = "GET", body, headers = {} } = {}) {
       body: body === undefined ? undefined : body,
     });
   } catch (error) {
-    throw new HttpError(502, `无法访问 Cloudflare API（${url}）：${error.message}`);
+    const reason = String(error?.message ?? error);
+    // Worker 每次调用能发的子请求是硬额度（免费版 50、付费版 1000），撞上了要能看出该做什么
+    if (/too many subrequests/i.test(reason)) {
+      throw new HttpError(503, `单个 Worker 调用的子请求数已达上限，请求停在 ${new URL(url).pathname}：${reason}`, {
+        hint: [
+          "免费版每个请求 50 个子请求，付费版 1000：Workers 控制台 → 账号订阅到 Paid 即可解除，不用改代码",
+          "不想升级就把这篇长文档拆成几次入库，或把 CHUNK_MAX_CHARS 调大（如 600→1200）减少片段数",
+          "每个片段要向嵌入模型发一次批量请求、向 D1/Vectorize 各写一次，片段数直接决定子请求总数",
+        ],
+      });
+    }
+    throw new HttpError(502, `无法访问 Cloudflare API（${url}）：${reason}`);
   }
 
   const text = await response.text();
@@ -91,18 +102,42 @@ export const d1 = {
   },
 
   async query(env, uuid, sql, params = []) {
-    const result = await call(env, `/accounts/{account_id}/d1/database/${uuid}/query`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sql, params }),
-    });
+    const result = await d1Post(env, uuid, { sql, params });
     const payload = Array.isArray(result) ? result[0] : result;
-    if (payload?.success === false) {
-      throw new HttpError(500, `SQL 执行失败：${JSON.stringify(payload?.errors ?? payload)}`);
-    }
+    checkStatement(payload, sql);
     return payload?.results ?? [];
   },
+
+  // 多条语句放进一次请求：D1 的 /query 认数组请求体，服务端按一个隐式事务顺序执行。
+  // 逐条 query() 会把「一次入库」变成「N 个子请求」，免费版 50 个的额度撑不住一篇网页。
+  async batch(env, uuid, statements) {
+    const result = await d1Post(env, uuid, statements);
+    const payloads = Array.isArray(result) ? result : [result];
+    if (payloads.length !== statements.length) {
+      throw new HttpError(502, `D1 批量写入返回了 ${payloads.length} 条结果，但发出了 ${statements.length} 条语句，无法确认哪些已写入`, {
+        hint: "这批语句在一个事务里执行，失败时通常全部回滚；请到 D1 控制台核对 documents/chunks 表后重新入库",
+      });
+    }
+    payloads.forEach((payload, index) => {
+      checkStatement(payload, index === 0 ? statements[0].sql : `第 ${index + 1}/${statements.length} 条语句：${statements[index].sql.slice(0, 80)}`);
+    });
+    return payloads.map((payload) => payload?.results ?? []);
+  },
 };
+
+async function d1Post(env, uuid, payload) {
+  return call(env, `/accounts/{account_id}/d1/database/${uuid}/query`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+function checkStatement(payload, sql = "") {
+  if (payload?.success === false) {
+    throw new HttpError(500, `SQL 执行失败：${JSON.stringify(payload?.errors ?? payload)}${sql ? `\n失败位置：${sql}` : ""}`);
+  }
+}
 
 // ---- Vectorize（v2 端点，写入用 NDJSON）--------------------------------------
 export const vectorize = {

@@ -26,32 +26,85 @@ async function run(env, sql, params = []) {
   return d1.query(env, uuid, sql, params);
 }
 
+// 一次 POST 能带多少语句受三个平台硬限制约束：
+// 单条语句最多 100 个绑定参数、SQL 文本最大 100KB，一次 batch 最多 100 条语句。
+const PARAMS_PER_CHUNK = 5;
+const MAX_PARAMS_PER_STATEMENT = 100;
+const MAX_STATEMENT_BYTES = 90_000;
+const MAX_BATCH_STATEMENTS = 100;
+const MAX_BATCH_BYTES = 500_000;
+
+const encoder = new TextEncoder();
+function bytes(value) {
+  return encoder.encode(String(value)).length;
+}
+
+function statementSize(statement) {
+  let size = bytes(statement.sql);
+  for (const param of statement.params) size += bytes(param) + 4;
+  return size;
+}
+
+// 多行 VALUES 拼 INSERT：参数与体积双重封顶，单条片段超长时也只独占一条语句，不丢内容
+export function chunkInsertStatements(docId, chunks) {
+  const rows = [];
+  const statements = [];
+  const flush = () => {
+    if (!rows.length) return;
+    statements.push({
+      sql: `INSERT INTO chunks (id, doc_id, ordinal, content, char_count) VALUES ${rows.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
+      params: rows.flat(),
+    });
+    rows.length = 0;
+  };
+  for (const [ordinal, content] of chunks.entries()) {
+    const row = [chunkId(docId, ordinal), docId, ordinal, content, content.length];
+    const rowBytes = row.reduce((size, value) => size + bytes(value) + 4, 0);
+    if (rows.length && (rows.length * PARAMS_PER_CHUNK + PARAMS_PER_CHUNK > MAX_PARAMS_PER_STATEMENT || rowBytes > MAX_STATEMENT_BYTES)) flush();
+    rows.push(row);
+  }
+  flush();
+  return statements;
+}
+
+async function runBatch(env, statements) {
+  const uuid = await databaseUuid(env);
+  let group = [];
+  let groupBytes = 0;
+  const send = async () => {
+    if (!group.length) return;
+    await d1.batch(env, uuid, group);
+    group = [];
+    groupBytes = 0;
+  };
+  for (const statement of statements) {
+    const size = statementSize(statement);
+    if (group.length && (groupBytes + size > MAX_BATCH_BYTES || group.length >= MAX_BATCH_STATEMENTS)) await send();
+    group.push(statement);
+    groupBytes += size;
+  }
+  await send();
+}
+
 export function chunkId(docId, ordinal) {
   return `${docId}-${ordinal}`;
 }
 
 export async function saveDocument(env, { docId, title, origin, text, chunks }) {
-  await run(env, "INSERT INTO documents (id, title, origin, char_count, chunk_count) VALUES (?, ?, ?, ?, ?)", [
-    docId,
-    title,
-    origin,
-    text.length,
-    chunks.length,
+  await runBatch(env, [
+    {
+      sql: "INSERT INTO documents (id, title, origin, char_count, chunk_count) VALUES (?, ?, ?, ?, ?)",
+      params: [docId, title, origin, text.length, chunks.length],
+    },
+    ...chunkInsertStatements(docId, chunks),
   ]);
-  for (const [ordinal, content] of chunks.entries()) {
-    await run(env, "INSERT INTO chunks (id, doc_id, ordinal, content, char_count) VALUES (?, ?, ?, ?, ?)", [
-      chunkId(docId, ordinal),
-      docId,
-      ordinal,
-      content,
-      content.length,
-    ]);
-  }
 }
 
 export async function deleteDocumentRows(env, docId) {
-  await run(env, "DELETE FROM chunks WHERE doc_id = ?", [docId]);
-  await run(env, "DELETE FROM documents WHERE id = ?", [docId]);
+  await runBatch(env, [
+    { sql: "DELETE FROM chunks WHERE doc_id = ?", params: [docId] },
+    { sql: "DELETE FROM documents WHERE id = ?", params: [docId] },
+  ]);
 }
 
 export async function listDocuments(env) {

@@ -7,6 +7,7 @@ import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 import { generateAnswer } from "../src/lib/answer.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
+import { chunkInsertStatements } from "../src/lib/store.js";
 
 const cases = [];
 function test(name, fn) {
@@ -315,8 +316,39 @@ test("检索：命中专有名词的片段不会被一堆双字词稀释掉", ()
   assert.ok(overlapScore(terms, core, hit) > overlapScore(terms, core, miss) + 0.15, `${overlapScore(terms, core, hit)} vs ${overlapScore(terms, core, miss)}`);
 });
 
-const THINK_OPEN = ["<", "think", ">"].join("");
-const THINK_CLOSE = ["<", "/", "think", ">"].join("");
+test("入库：片段 INSERT 按参数与体积上限合批，一次请求写入多篇片段", () => {
+  const chunks = Array.from({ length: 60 }, (_, i) => `第 ${i} 条：` + "退货申请需要在签收后七天内提交。".repeat(8));
+  const statements = chunkInsertStatements("doc-1", chunks);
+  assert.ok(statements.length > 1 && statements.length < 12, `应合批成少量语句，实际 ${statements.length}`);
+  const ids = [];
+  for (const { sql, params } of statements) {
+    assert.ok(params.length % 5 === 0);
+    assert.ok(params.length <= 100, `单条语句最多 100 个绑定参数，实际 ${params.length}`);
+    assert.equal((sql.match(/\(\?, \?, \?, \?, \?\)/g) || []).length, params.length / 5, "占位符组要与参数行对齐");
+    assert.ok(new TextEncoder().encode(sql).length < 90_000, "SQL 文本要留在 100KB 限制内");
+    for (let i = 0; i < params.length; i += 5) ids.push(params[i]);
+  }
+  assert.deepEqual(ids, chunks.map((_, i) => `doc-1-${i}`), "每个片段恰好写一次，顺序不乱");
+
+  // 超长片段不能因为合批就被丢掉或截断
+  const huge = ["a".repeat(120_000), "短片段"];
+  const hugeStatements = chunkInsertStatements("doc-2", huge);
+  const hugeParams = hugeStatements.flatMap((statement) => statement.params);
+  assert.ok(hugeParams.includes("a".repeat(120_000)), "超长内容原样保留");
+  assert.ok(hugeParams.includes("短片段"));
+
+  // 生成的语句在真实 SQLite 上跑通
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE chunks (id TEXT PRIMARY KEY, doc_id TEXT, ordinal INTEGER, content TEXT, char_count INTEGER)");
+  for (const { sql, params } of statements) db.prepare(sql).run(...params);
+  const stored = db.prepare("SELECT id, ordinal, content, char_count FROM chunks ORDER BY ordinal").all();
+  assert.equal(stored.length, 60);
+  assert.equal(stored[7].content, chunks[7]);
+  assert.equal(stored[7].char_count, chunks[7].length);
+  db.close();
+});
+
+const THINK_OPEN = ["<", "think", ">"].join("");const THINK_CLOSE = ["<", "/", "think", ">"].join("");
 const RAG_PASSAGE = [{ docId: "a", title: "退货政策", ordinal: 0, content: "退货申请需要在签收后七天内提交，逾期不再受理。", score: 0.9, vector: 0.82, lexical: 0.7 }];
 
 test("生成：推理模型的思考块不显示给用户，输出上限读配置", async () => {

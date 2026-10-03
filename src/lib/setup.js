@@ -22,9 +22,8 @@ export async function initialize(env) {
   resetDatabaseCache();
   const uuid = await databaseUuid(env);
 
-  for (const sql of SCHEMA_STATEMENTS) {
-    await d1.query(env, uuid, sql);
-  }
+  // 建表语句全部幂等，合成一次请求：逐条 query 会白占好几个子请求额度
+  await d1.batch(env, uuid, SCHEMA_STATEMENTS.map((sql) => ({ sql, params: [] })));
   steps.push({ step: "tables", action: "ensure", detail: "documents / chunks" });
 
   const existing = await vectorize.getIndex(env, env.INDEX_NAME);
