@@ -22,7 +22,7 @@
     "EMBEDDING_METRIC": "cosine",
     // 必须是 schema 里有 messages 分支的对话模型；completion 系的老模型（如 @cf/meta/llama-3.2-3b-instruct）只认 prompt，
     // 用 env.AI.run 发 messages 会得到 5006 oneOf not met
-    "CHAT_MODEL": "@cf/nvidia/nemotron-3-120b-a12b",
+    "CHAT_MODEL": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",
     "CHUNK_OVERLAP_CHARS": "120",
