@@ -23,6 +23,8 @@
     // 必须是 schema 里有 messages 分支的对话模型；completion 系的老模型（如 @cf/meta/llama-3.2-3b-instruct）只认 prompt，
     // 用 env.AI.run 发 messages 会得到 5006 oneOf not met
     "CHAT_MODEL": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+    // 推理模型的思考过程也算在输出额度里，900 会被思考吃满导致答案被截断
+    "CHAT_MAX_TOKENS": "1500",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",
     "CHUNK_OVERLAP_CHARS": "120",
