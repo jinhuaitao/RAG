@@ -5,7 +5,7 @@
 全程不需要本地安装 wrangler，不需要 GitHub Actions，也不需要任何第三方 API Key：
 
 - **Workers** 跑逻辑，**Workers Assets** 直出前端单页（零构建步骤）
-- **Workers AI** 做嵌入与生成（免费额度即可跑通）
+- **Workers AI** 做嵌入与生成（小模型免费额度够用，大模型按 token 计费）
 - **D1** 存文档与切片原文，**Vectorize** 存向量
 - 首次部署后，Worker **自己调用 Cloudflare REST API 建库、建表、建向量索引**——点一下页面上的「初始化资源」按钮就完成，无需手填任何资源 ID
 
@@ -145,6 +145,7 @@ curl -s -X POST https://rag-kb.<子域>.workers.dev/api/admin/setup \
 - **重定向逐跳复验**：最多跟 3 跳，每一跳的 `Location` 都重新过一遍上面的校验，防止「公网地址 302 到内网」。
 - **大小限制**：先看 `Content-Length`，再边读边累计，超过 `FETCH_MAX_BYTES`（默认 800 KB）立即中断连接并返回 413，不会被超大页面吃满内存。
 - **只收文本**：返回 PDF / Word / 图片 / `octet-stream` 一律 415；非 2xx 会翻成中文提示（401/403 → 需要登录或反爬，建议复制正文；404 → 页面不存在；429 → 被限流）。
+- **写入合批**：抓一页几十个片段也只发一两次 D1 请求（多行 `INSERT` + batch），避免吃满 Worker 的子请求额度；上限与调法见[常见问题](#常见问题)里的 `Too many subrequests`。
 
 已知限制：靠 JavaScript 渲染的页面（SPA、需滚动加载的正文）抓不到内容，返回 422 并提示改用「粘贴正文」；需要登录的站点抓不到；Workers 无法在抓取前做 DNS 解析，所以理论上存在 DNS rebinding（域名先解析成公网、请求时改指内网）与 `1.2.3.4.nip.io` 这类把内网 IP 编进域名的服务，若知识库开放给他人使用，建议给 Worker 加上 Access。
 
@@ -246,7 +247,8 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | `EMBEDDING_MODEL` | `@cf/baai/bge-m3` | 嵌入模型，多语言，适合中文资料 |
 | `EMBEDDING_DIMENSIONS` | `1024` | **必须与索引维度一致**，初始化时用它建索引 |
 | `EMBEDDING_METRIC` | `cosine` | 距离度量 |
-| `CHAT_MODEL` | `@cf/meta/llama-3.1-8b-instruct-fp8` | 生成模型 |
+| `CHAT_MODEL` | `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | 生成模型。**必须换成 schema 里有 `messages` 分支的对话模型**——只认 `prompt` 的 completion 老模型（如 `@cf/meta/llama-3.2-3b-instruct`）会报 5006 `oneOf not met`；它是推理模型，按 token 计费，见[额度](#额度) |
+| `CHAT_MAX_TOKENS` | `1500` | 生成上限（1–4096）。推理模型的思考过程也吃这份额度，太小会被截断成「只有思考没有正文」，页面会提示调大这个值 |
 | `TOP_K` | `6` | 默认召回片段数，请求里可用 `topK` 覆盖（1–20） |
 | `CHUNK_MAX_CHARS` | `600` | 单切片目标长度（字符） |
 | `CHUNK_OVERLAP_CHARS` | `120` | 相邻切片重叠，防止句子在边界被切断 |
@@ -306,8 +308,20 @@ Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` �
 **忘了 `ADMIN_TOKEN`**
 它只以 Secret 形式存在 Worker 侧，无法查看。在控制台 Settings 里删掉再设一个新值，页面右上角填新值即可，知识库数据不受影响。
 
+**问答报 5006：`oneOf at '/' not met, 0 matches: required properties … are 'prompt' / 'messages'`**
+`CHAT_MODEL` 换成了 completion 时代的老模型（`@cf/meta/llama-3.2-3b-instruct`、llama-2 系列等）。Workers AI 的 `env.AI.run` 会按**每个模型自己的 JSON Schema** 校验请求体，而本项目发的是 `{ messages, temperature, max_tokens }`，老模型的 schema 只接受单串 `prompt`，于是两条 oneOf 分支都不匹配。换一个在架的对话模型就行（`@cf/deepseek-ai/deepseek-r1-distill-qwen-32b`、`@cf/nvidia/nemotron-3-120b-a12b`、`@cf/meta/llama-3.3-70b-instruct-fp8-fast`），代码不用动；拿不准的话先在控制台 Workers AI 模型页用 messages 试跑一次。
+
+**报「思考过程没写完就被截断，正文为空」，或者回答里混着一大段推理过程**
+默认的生成模型是推理模型，它会先输出一段思考文本，再给正文，而思考的 token 也算在 `CHAT_MAX_TOKENS`（默认 1500）里。思考太长就会被截断成「只有思考、没有正文」——这时按报错里的提示把 `CHAT_MAX_TOKENS` 调到 2500–3000。正常情况下 Worker 会把思考块剥掉再显示，只留正文；如果你换回非推理模型（llama 系），这个字段设回 900 就够了。
+
+**入库（尤其是网址抓取）报「单个 Worker 调用的子请求数已达上限」/ `Too many subrequests by single Worker invocation`**
+Workers 每次请求能发起的**外部调用（子请求）**是有硬额度的：免费版 50 个、付费版 1000 个。一次入库要发的子请求数 ≈ `1（抓页面）+ 片段数 ÷ 16（嵌入）+ 片段数 ÷ 50（写向量）+ 若干（写 D1）`，所以一篇几百片段的长文档在免费版会撞墙。代码侧已经把 D1 写入合批（多行 `VALUES` + 一次 batch 请求，60 个片段从 61 次请求降到 1 次），仍然超限时的办法：
+- 升级到 Workers Paid（付费版每次 1000 个子请求），**不用改代码**；
+- 把长文档拆成几次入库（按章节分篇还能让片段更聚焦，顺带提升检索）；
+- 调大 `CHUNK_MAX_CHARS`（例如 600 → 1200）直接减少片段数。
+
 **额度**
-Workers 免费计划含每天 10 万次请求；Workers AI 的免费用量按模型分配（嵌入与生成各有每日上限）；Vectorize 免费计划可建索引并存放有限向量。个人知识库够用，规模化前请在控制台核对 Workers AI 与 Vectorize 的当前配额说明。
+Workers 免费计划含每天 10 万次请求；Workers AI 的免费用量按模型分配（嵌入与生成各有每日上限），**32B 以上这一档不参与免费额度，按 token 计费**：默认的 `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` 约 $0.497/百万输入、$4.881/百万输出，本项目每次提问约 6–8k 输入 + ≤1.5k 输出（思考过程也算输出），粗算 $0.01/次；要压成本就把 `CHAT_MODEL` 换成 `@cf/meta/llama-3.1-8b-instruct-fp8`（8B 档便宜得多，也没有思考长度不可控的问题）。Vectorize 免费计划可建索引并存放有限向量。规模化前请在控制台核对 Workers AI 与 Vectorize 的当前配额与单价说明。
 
 ## 安全说明
 

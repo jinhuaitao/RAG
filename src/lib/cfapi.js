@@ -134,9 +134,11 @@ async function d1Post(env, uuid, payload) {
 }
 
 function checkStatement(payload, sql = "") {
-  if (payload?.success === false) {
-    throw new HttpError(500, `SQL 执行失败：${JSON.stringify(payload?.errors ?? payload)}${sql ? `\n失败位置：${sql}` : ""}`);
-  }
+  if (!payload || payload.success !== false) return;
+  // D1 的失败体是 { success: false, error: "…" }（workerd 的类型里 error 是单数字符串），
+  // 而 API 网关层的错误在 errors[] 里，两种都要能读出原因
+  const reason = payload.error ?? payload.errors?.[0]?.message ?? JSON.stringify(payload);
+  throw new HttpError(500, `SQL 执行失败：${reason}${sql ? `\n失败位置：${sql}` : ""}`);
 }
 
 // ---- Vectorize（v2 端点，写入用 NDJSON）--------------------------------------

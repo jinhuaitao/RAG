@@ -85,7 +85,8 @@ async function handleApi(req, res) {
       try {
         return { success: true, meta: { changes: 0 }, results: database.sqlite.prepare(sql).all(...params) };
       } catch (error) {
-        return { success: false, errors: [{ message: error.message }], results: [], meta: {} };
+        // 与真实 D1 一致：失败体是 { success:false, error:"…" }，不是 errors 数组
+        return { success: false, error: error.message };
       }
     };
     return send(200, envelope(Array.isArray(payload) ? payload.map(run) : run(payload)));
