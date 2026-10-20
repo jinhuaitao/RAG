@@ -115,9 +115,85 @@ const PARAM_ERROR = /max_tokens|max_completion_tokens|temperature/i;
 // 聚合站把各渠道的失败包在 5xx 里返回（"所有渠道均失败: 魔搭社区: HTTP 400 …"），
 // 真正的状态码藏在文本里，不能按外层状态码当成服务端故障
 const AGGREGATOR = /所有渠道均失败|所有渠道失败|all channels failed/i;
+// 上游说「这个模型不存在」：多半是把聊天模型当成了嵌入模型，或模型 ID 写错
+const MODEL_MISSING = /model not found|no such model|unknown model|invalid model|模型不存在|没有这个模型|model_not_found|unsupported model/i;
+// 名字里带这些片段的，多半是向量化模型（平台一般不给聊天模型起这种名字）
+const EMBEDDING_NAME = /embedding|embed|bge|gte|e5|m3e|jina|nomic|mxbai|bce|stella|gritlm|conan|paraphrase|granite/i;
+
+// 平台侧的模型清单：上游说模型不存在时，直接用它告诉用户该填哪个
+export async function listModelIds(env) {
+  let response;
+  try {
+    response = await fetch(`${apiBase(env)}/models`, {
+      headers: authHeaders(env),
+      signal: AbortSignal.timeout(8_000),
+    });
+  } catch {
+    return [];
+  }
+  if (!response.ok) return [];
+  try {
+    const payload = await response.json();
+    const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : Array.isArray(payload) ? payload : [];
+    return list.map((item) => (typeof item === "string" ? item : item?.id)).filter((id) => typeof id === "string" && id.trim());
+  } catch {
+    return [];
+  }
+}
+
+function pickModels(ids, kind) {
+  const embeddingLike = ids.filter((id) => EMBEDDING_NAME.test(id));
+  const chatLike = ids.filter((id) => !EMBEDDING_NAME.test(id));
+  if (kind === "embedding") return embeddingLike.length ? embeddingLike : chatLike;
+  return chatLike.length ? chatLike : embeddingLike;
+}
+
+// 上游说「模型不存在」时，别只回一句「模型 ID 不存在」：
+// 把当前填的是哪个变量、平台上到底有哪些模型、维度要怎么跟着改，一次说清
+async function modelMissingError(env, kind, model, reason) {
+  const ids = await listModelIds(env);
+  const candidates = pickModels(ids, kind);
+  const isEmbedding = kind === "embedding";
+  const label = isEmbedding ? "嵌入模型" : "生成模型";
+  const variable = isEmbedding ? "EMBEDDING_MODEL" : "CHAT_MODEL";
+
+  const hint = [
+    `当前 ${variable} = ${model}`,
+    isEmbedding
+      ? "嵌入模型要能输出向量，聊天模型不能用来做嵌入（DeepSeek / GPT / Claude 这类只能回答问题）"
+      : "生成模型要能回答问题，嵌入模型不能用来生成回答",
+  ];
+  if (isEmbedding && String(env.CHAT_MODEL || "").trim() === model) {
+    hint.push("EMBEDDING_MODEL 和 CHAT_MODEL 填成了同一个模型 —— 这两个必须是两个不同的模型");
+  }
+  if (candidates.length) {
+    hint.push(`这个平台上可用的${label}：${candidates.slice(0, 8).join("、")}`);
+  } else if (ids.length) {
+    hint.push(`这个平台返回了 ${ids.length} 个模型，但没找到常见的${label}，确认平台上是否提供向量模型`);
+  } else {
+    hint.push("拉不到平台模型清单，用 curl 看一眼：curl <API_URL>/models -H 'authorization: Bearer <API_KEY>'");
+  }
+  if (isEmbedding) {
+    hint.push("入库走的 /embeddings 地址没错，问题在模型 ID：嵌入必须用向量模型");
+    hint.push("换模型要同步改 EMBEDDING_DIMENSIONS（bge-m3=1024、text-embedding-3-small=1536、Qwen3-Embedding-8B=4096）");
+    hint.push("改完重新部署，点「初始化资源」按新维度重建索引");
+  }
+  if (AGGREGATOR.test(reason)) {
+    hint.push("「所有渠道均失败」说明是聚合站逐个渠道转发：这个模型在它挂的渠道里都不是向量模型");
+  }
+  return new HttpError(502, `第三方平台没有这个${label}：${reason}`, { hint });
+}
 
 // 把上游返回的失败翻译成能直接照着做的中文提示：分清「不可改的」与「可修的」
 function providerError(status, payload, text, url) {
+  const error = buildProviderError(status, payload, text, url);
+  // 上游原话单独挂一份：判断「是不是模型不存在」要看上游说了什么，
+  // 不能看我们自己拼的中文提示（里面也有「模型不存在」几个字）
+  error.providerReason = providerMessage(payload, text);
+  return error;
+}
+
+function buildProviderError(status, payload, text, url) {
   const reason = providerMessage(payload, text);
   const haystack = `${reason}\n${text ?? ""}`;
   const extra = AGGREGATOR.test(haystack)
@@ -336,8 +412,11 @@ export async function chatCompletion(env, { messages, temperature = 0.2, maxToke
     try {
       payload = await callApi(env, "/chat/completions", variant.build(model, messages, temperature, max));
     } catch (error) {
+      const reason = String(error?.providerReason ?? error?.message ?? error);
+      // 模型不存在时换请求形状也没用，直接说清楚该改哪个变量
+      if (MODEL_MISSING.test(reason)) throw await modelMissingError(env, "chat", model, reason);
       lastError = error;
-      variant = nextVariant(String(error?.message ?? ""), tried);
+      variant = nextVariant(reason, tried);
       continue;
     }
     const { content, reasoning } = readContent(payload);
@@ -382,7 +461,14 @@ export async function embeddings(env, texts) {
       ],
     });
   }
-  const payload = await callApi(env, "/embeddings", { model, input: texts });
+  let payload;
+  try {
+    payload = await callApi(env, "/embeddings", { model, input: texts });
+  } catch (error) {
+    const reason = String(error?.providerReason ?? error?.message ?? error);
+    if (MODEL_MISSING.test(reason)) throw await modelMissingError(env, "embedding", model, reason);
+    throw error;
+  }
   const data = payload?.data;
   if (!Array.isArray(data) || data.length !== texts.length) {
     throw new HttpError(502, `嵌入接口返回异常：期望 ${texts.length} 条向量，实际 ${Array.isArray(data) ? data.length : "无"}`, {

@@ -324,6 +324,11 @@ Worker 会按上游的报错内容自动换形状重试，顺序是：
 **入库报「向量维度不匹配」**
 `EMBEDDING_MODEL` 的输出维度 ≠ `EMBEDDING_DIMENSIONS`。查该模型的实际维度并改正，然后按[换模型 / 换维度](#换模型--换维度)重建。
 
+**入库报「第三方平台没有这个嵌入模型」/ 上游说 `Embedding model not found`**
+入库要的是**向量**，模型 ID 填成了聊天模型（DeepSeek / GPT / Claude 这类只能回答问题，不能做嵌入），或者这个平台上根本没有这个嵌入模型。报错里会直接列出平台上可用的嵌入模型（Worker 自己去 `/models` 拉的清单），照着换一个即可；`EMBEDDING_MODEL` 和 `CHAT_MODEL` 必须是两个不同的模型。
+
+换完记得同步改 `EMBEDDING_DIMENSIONS`（bge-m3 = 1024、bge-large-zh = 1024、text-embedding-3-small = 1536、Qwen3-Embedding-8B = 4096），然后点**初始化资源**按新维度重建索引。`/embeddings` 这个地址本身没错——嵌入本来就走它。
+
 **页面提示「还差一步：配置模型接口」/ 状态里 `llm_ready` 为 false**
 `API_URL` 或 `API_KEY` 没配好。到 **Settings → Variables and Secrets** 里加 `API_URL`（Text）和 `API_KEY`（**Secret**），保存后 Retry deployment，再点页面上的「重新检查」。`API_KEY` 没配时问答与入库都会返回 503，并附带上面这三步的操作提示。
 

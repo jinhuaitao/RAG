@@ -573,6 +573,7 @@ test("第三方接口：上游的普通 400 不做无谓重试，直接把原因
 
 test("第三方接口：聚合站把上游 400 包成 5xx，要按真实状态码说人话", async () => {
   let calls = 0;
+  let modelLookups = 0;
   const body = {
     errors: {
       message:
@@ -580,7 +581,12 @@ test("第三方接口：聚合站把上游 400 包成 5xx，要按真实状态�
     },
   };
   await withFetch(
-    async () => {
+    async (url) => {
+      // 查模型清单是诊断请求，不算重试
+      if (url.endsWith("/models")) {
+        modelLookups += 1;
+        return jsonResponse({ data: [{ id: "demo/aggregator" }, { id: "other/chat" }] });
+      }
       calls += 1;
       return jsonResponse(body, 500);
     },
@@ -599,6 +605,7 @@ test("第三方接口：聚合站把上游 400 包成 5xx，要按真实状态�
       const hint = String(thrown.details?.hint);
       assert.ok(!hint.includes("上游服务异常"), hint);
       assert.ok(hint.includes("聚合站"), hint);
+      assert.equal(modelLookups, 1, "模型不存在时要拉一次平台清单，告诉用户该填哪个");
     }
   );
 });
@@ -678,6 +685,60 @@ test("部署配置：不声明 vars 且打开 keep_vars，控制台的变量才�
   assert.equal(config.keep_vars, true, "wrangler.jsonc 必须开 keep_vars");
   assert.equal(config.vars, undefined, "wrangler.jsonc 不能声明 vars：声明了就会在部署时覆盖控制台的值");
   assert.equal(config.assets?.binding, "ASSETS", "Assets 绑定要留着");
+});
+
+test("第三方接口：嵌入模型不存在时，点名要改的变量并列出平台上能用的嵌入模型", async () => {
+  const urls = [];
+  const env = { ...LLM_ENV, EMBEDDING_MODEL: "DeepSeek-V4-Flash", CHAT_MODEL: "DeepSeek-V4-Flash" };
+  await withFetch(
+    async (url) => {
+      urls.push(url);
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "BAAI/bge-m3" }, { id: "text-embedding-3-small" }, { id: "deepseek-chat" }] });
+      }
+      return jsonResponse(
+        { errors: { message: "所有渠道均失败: AMD [Key4/4]: HTTP 400 Embedding model not found: DeepSeek-V4-Flash" } },
+        400
+      );
+    },
+    async () => {
+      let thrown;
+      try {
+        await embeddings(env, ["测试"]);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.ok(/嵌入模型/.test(thrown.message), thrown?.message);
+      const hint = (thrown?.details?.hint ?? []).join(" | ");
+      assert.ok(/EMBEDDING_MODEL = DeepSeek-V4-Flash/.test(hint), hint);
+      assert.ok(/BAAI\/bge-m3/.test(hint), hint);
+      assert.ok(/EMBEDDING_DIMENSIONS/.test(hint), hint);
+      assert.ok(/同一个模型/.test(hint), hint);
+      assert.ok(urls.some((url) => url.endsWith("/models")), urls.join(" "));
+    }
+  );
+});
+
+test("第三方接口：嵌入接口的普通 400 不多发模型清单请求", async () => {
+  const urls = [];
+  await withFetch(
+    async (url) => {
+      urls.push(url);
+      return jsonResponse({ error: { message: "input too long" } }, 400);
+    },
+    async () => {
+      let thrown;
+      try {
+        await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "demo/embed" }, ["测试"]);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.ok(!urls.some((url) => url.endsWith("/models")), urls.join(" "));
+      assert.ok(/上游服务异常|拒绝了这次请求/.test(String(thrown.message)), thrown?.message);
+    }
+  );
 });
 
 let failed = 0;

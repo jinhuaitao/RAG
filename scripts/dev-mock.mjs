@@ -51,6 +51,14 @@ function fakeEmbedding(text) {
   return vector.map((value) => value / norm);
 }
 
+// 假的 /v1/models：聚合站都会给一份可用模型清单
+const MOCK_MODELS = ["mock/bge-m3", "BAAI/bge-large-zh-v1.5", "mock/llama", "mock/qwen-max"];
+
+function mockModels(res) {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ object: "list", data: MOCK_MODELS.map((id) => ({ id, object: "model", owned_by: "mock" })) }));
+}
+
 // 假的 /v1/embeddings：返回 OpenAI 兼容的 data 数组
 function mockEmbeddings(res, body) {
   let payload;
@@ -58,6 +66,11 @@ function mockEmbeddings(res, body) {
     payload = JSON.parse(body || "{}");
   } catch (error) {
     return res.writeHead(400, { "content-type": "application/json" }), res.end(JSON.stringify({ error: { message: error.message } }));
+  }
+  // 聊天模型不能做嵌入：真平台会回 "Embedding model not found"
+  if (payload.model && !/bge|embed/i.test(payload.model)) {
+    return res.writeHead(400, { "content-type": "application/json" }),
+      res.end(JSON.stringify({ errors: { message: `所有渠道均失败: mock [Key1/1]: HTTP 400 Embedding model not found: ${payload.model}` } }));
   }
   const input = Array.isArray(payload.input) ? payload.input : [payload.input];
   const data = input.map((text, index) => ({ object: "embedding", index, embedding: fakeEmbedding(text) }));
@@ -133,6 +146,12 @@ async function handleApi(req, res) {
   const body = ["POST", "PUT"].includes(req.method) ? await readBody(req) : "";
 
   // 第三方 OpenAI 兼容接口：走自己的鉴权，不吃 Cloudflare 的 Token
+  if (path === "/v1/models" && req.method === "GET") {
+    if ((req.headers.authorization || "") !== `Bearer ${LLM_KEY}`) {
+      return send(401, JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error" } }));
+    }
+    return mockModels(res);
+  }
   if (path === "/v1/embeddings" || path === "/v1/chat/completions") {
     if ((req.headers.authorization || "") !== `Bearer ${LLM_KEY}`) {
       return send(401, JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error" } }));
