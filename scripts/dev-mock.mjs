@@ -1,4 +1,5 @@
-// 离线冒烟/预览：起一个假的 Cloudflare REST API（D1 + Vectorize v2 端点）和一个假的 Workers AI，
+// 离线冒烟/预览：起一个假的 Cloudflare REST API（D1 + Vectorize v2 端点）和一个假的第三方
+// OpenAI 兼容接口（/v1/embeddings 与 /v1/chat/completions），
 // Worker 代码走的是真实 REST 路径，所以不登录 Cloudflare 也能端到端验证「初始化 → 入库 → 检索 → 问答 → 删除」。
 // 用法：node scripts/dev-mock.mjs [port]
 import { createServer } from "node:http";
@@ -7,11 +8,12 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import worker from "../src/index.js";
 
-const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1024);
+const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1536);
 const APP_PORT = Number(process.argv[2]) || 8790;
 const API_PORT = APP_PORT + 1;
 const ACCOUNT_ID = "mock-account-0000";
 const API_TOKEN = "mock-token";
+const LLM_KEY = process.env.API_KEY || "mock-llm-key";
 
 // ---- 假的 Cloudflare API ----------------------------------------------------
 const databases = new Map(); // uuid -> { name, sqlite }
@@ -47,6 +49,55 @@ function fakeEmbedding(text) {
   return vector.map((value) => value / norm);
 }
 
+// 假的 /v1/embeddings：返回 OpenAI 兼容的 data 数组
+function mockEmbeddings(res, body) {
+  let payload;
+  try {
+    payload = JSON.parse(body || "{}");
+  } catch (error) {
+    return res.writeHead(400, { "content-type": "application/json" }), res.end(JSON.stringify({ error: { message: error.message } }));
+  }
+  const input = Array.isArray(payload.input) ? payload.input : [payload.input];
+  const data = input.map((text, index) => ({ object: "embedding", index, embedding: fakeEmbedding(text) }));
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(
+    JSON.stringify({
+      object: "list",
+      data,
+      model: payload.model || "mock-embedding",
+      usage: { prompt_tokens: 8, total_tokens: 8 },
+    })
+  );
+}
+
+// 假的 /v1/chat/completions：从提示词里认出资料与问题，拼一段带编号的回答
+function mockChat(res, body) {
+  let payload;
+  try {
+    payload = JSON.parse(body || "{}");
+  } catch (error) {
+    return res.writeHead(400, { "content-type": "application/json" }), res.end(JSON.stringify({ error: { message: error.message } }));
+  }
+  const user = [...(payload.messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
+  const context = user.match(/【参考资料】([\s\S]*?)【问题】/)?.[1] ?? "";
+  const question = user.match(/【问题】\n([\s\S]*)$/)?.[1]?.trim() ?? "";
+  const numbered = [...context.matchAll(/【(\d+)】《([^》]+)》/g)].map(([, n, title]) => `[${n}]《${title}》`);
+  const content = context.trim()
+    ? `（模拟回答，非真实模型输出）关于“${question}”：依据 ${numbered.join("、") || "[1]"}。`
+    : "知识库中没有相关信息。";
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(
+    JSON.stringify({
+      id: `chatcmpl-${randomUUID()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: payload.model || "mock-chat",
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 128, completion_tokens: 42, total_tokens: 170 },
+    })
+  );
+}
+
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${API_PORT}`);
   const send = (status, body, type = "application/json") => {
@@ -54,12 +105,20 @@ async function handleApi(req, res) {
     res.end(body);
   };
 
+  const path = url.pathname.replace(`/client/v4/accounts/${ACCOUNT_ID}`, "");
+  const body = ["POST", "PUT"].includes(req.method) ? await readBody(req) : "";
+
+  // 第三方 OpenAI 兼容接口：走自己的鉴权，不吃 Cloudflare 的 Token
+  if (path === "/v1/embeddings" || path === "/v1/chat/completions") {
+    if ((req.headers.authorization || "") !== `Bearer ${LLM_KEY}`) {
+      return send(401, JSON.stringify({ error: { message: "Incorrect API key provided", type: "invalid_request_error" } }));
+    }
+    return path === "/v1/embeddings" ? mockEmbeddings(res, body) : mockChat(res, body);
+  }
+
   if ((req.headers.authorization || "") !== `Bearer ${API_TOKEN}`) {
     return send(401, envelope(null, [{ code: 10000, message: "Authentication error" }]));
   }
-
-  const path = url.pathname.replace(`/client/v4/accounts/${ACCOUNT_ID}`, "");
-  const body = ["POST", "PUT"].includes(req.method) ? await readBody(req) : "";
 
   // D1：列库 / 建库
   if (path === "/d1/database" && req.method === "GET") {
@@ -186,28 +245,8 @@ const api = createServer((req, res) => {
   });
 });
 
-// ---- 假的 Workers AI 绑定 ---------------------------------------------------
-const AI = {
-  async run(model, input) {
-    if (input && (Array.isArray(input.text) || typeof input.text === "string")) {
-      const texts = Array.isArray(input.text) ? input.text : [input.text];
-      return { data: texts.map(fakeEmbedding), model: `${model} (mock)` };
-    }
-    // 复刻真实账号上遇到过的下线错误（5028），用来验证 Worker 的中文提示分支
-    if (/llama-3\.1-8b-instruct(?!-fp8)/.test(model)) {
-      throw new Error(`5028: @cf/meta/infire-${model.split("/").pop()} was deprecated on 2026-05-30. See the model catalog for alternatives.`);
-    }
-    const user = [...(input.messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
-    const context = user.match(/【参考资料】([\s\S]*?)【问题】/)?.[1] ?? "";
-    const question = user.match(/【问题】\n([\s\S]*)$/)?.[1]?.trim() ?? "";
-    if (!context.trim()) return { response: "知识库中没有相关信息。" };
-    const numbered = [...context.matchAll(/【(\d+)】《([^》]+)》/g)].map(([, n, title]) => `[${n}]《${title}》`);
-    return { response: `（模拟回答，非真实模型输出）关于“${question}”：依据 ${numbered.join("、") || "[1]"}。`, model: "mock" };
-  },
-};
-
+// ---- 假的第三方 OpenAI 兼容接口 ------------------------------------------------
 const env = {
-  AI,
   ASSETS: {
     fetch: async (request) => {
       const path = new URL(request.url).pathname;
@@ -226,10 +265,13 @@ const env = {
   CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
   DB_NAME: "rag-kb-db",
   INDEX_NAME: "rag-kb-index",
-  EMBEDDING_MODEL: "@cf/mock/bge-m3",
+  API_URL: `http://127.0.0.1:${API_PORT}/v1`,
+  API_KEY: LLM_KEY,
+  API_TIMEOUT_MS: "60000",
+  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || "mock/bge-m3",
   EMBEDDING_DIMENSIONS: String(DIMENSIONS),
   EMBEDDING_METRIC: "cosine",
-  CHAT_MODEL: process.env.CHAT_MODEL || "@cf/mock/llama",
+  CHAT_MODEL: process.env.CHAT_MODEL || "mock/llama",
   CHAT_MAX_TOKENS: "1500",
   TOP_K: "6",
   CHUNK_MAX_CHARS: "600",
@@ -278,4 +320,5 @@ createServer(async (req, res) => {
 }).listen(APP_PORT, "127.0.0.1", () => {
   console.log(`✓ 应用 http://127.0.0.1:${APP_PORT}  ·  假 Cloudflare API http://127.0.0.1:${API_PORT}/client/v4`);
   console.log(`  访问令牌（ADMIN_TOKEN）= ${env.ADMIN_TOKEN}   D1/Vectorize 为内存模拟，重启即清空`);
+  console.log(`  假模型接口 ${env.API_URL}  ·  API_KEY=${env.API_KEY}`);
 });

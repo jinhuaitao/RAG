@@ -3,87 +3,175 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>知识库问答 · Cloudflare RAG</title>
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="基于自有资料作答的知识库问答：上传或粘贴文档，向量化入库，提问时召回原文并标注引用。" />
+    <title>知识库问答 · RAG</title>
     <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234c6ef5'/%3E%3Cpath d='M9 10h14M9 16h10M9 22h6' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="logo">RAG</span>
-        <div>
-          <h1>知识库问答</h1>
-          <p id="statusLine" class="muted">正在读取服务状态…</p>
+    <a class="skip-link" href="#main">跳到主内容</a>
+
+    <header class="appbar">
+      <div class="appbar-inner">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="20" height="20">
+              <path d="M9 10h14M9 16h10M9 22h6" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <h1>知识库问答</h1>
+            <p id="statusLine" class="brand-sub">正在连接服务…</p>
+          </div>
         </div>
-      </div>
-      <div class="token-box">
-        <input id="token" type="password" placeholder="访问令牌（未开启鉴权可留空）" autocomplete="off" />
-        <button id="saveToken" class="ghost" type="button">保存</button>
+
+        <div class="appbar-tools">
+          <div id="statChips" class="chips" aria-label="服务状态"></div>
+          <div class="token-field">
+            <label for="token">访问令牌</label>
+            <input id="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off" spellcheck="false" />
+            <button id="saveToken" class="btn btn-ghost" type="button">保存</button>
+          </div>
+        </div>
       </div>
     </header>
 
-    <nav class="tabs">
-      <button class="tab active" data-tab="ask" type="button">问答</button>
-      <button class="tab" data-tab="kb" type="button">知识库管理</button>
-    </nav>
-
-    <main>
-      <section id="setup" class="card setup hidden">
-        <h2>还差一步：初始化资源</h2>
-        <p id="setupDetail" class="muted"></p>
-        <div class="row">
-          <button id="setupBtn" class="primary" type="button">初始化资源</button>
-          <span id="setupHint" class="muted"></span>
+    <div class="navbar">
+      <div class="navbar-inner">
+        <div class="segmented" role="tablist" aria-label="主导航">
+          <button class="seg is-active" type="button" role="tab" id="tab-ask" aria-selected="true" aria-controls="panel-ask" data-tab="ask">
+            问答
+          </button>
+          <button class="seg" type="button" role="tab" id="tab-kb" aria-selected="false" aria-controls="panel-kb" data-tab="kb">
+            知识库管理
+          </button>
         </div>
-      </section>
+        <p class="navbar-note">答案只依据已入库的资料，引用角标可点开核对原文</p>
+      </div>
+    </div>
 
-      <section id="panel-ask" class="panel active">
-        <div class="card">
-          <label for="question">提问</label>
-          <textarea id="question" rows="3" placeholder="例如：项目的退款流程是怎样的？"></textarea>
-          <div class="row">
-            <label>召回片段数 <select id="topK"><option>3</option><option selected>6</option><option>10</option></select></label>
-            <button id="askBtn" class="primary" type="button">提问</button>
-            <span id="askHint" class="muted"></span>
+    <main class="main" id="main">
+      <div id="banners" class="banners" role="region" aria-label="提示与待办" hidden></div>
+
+      <section id="panel-ask" class="panel is-active" role="tabpanel" aria-labelledby="tab-ask">
+        <div class="card composer">
+          <div class="card-head">
+            <h2>提问</h2>
+            <span class="hint">⌘ / Ctrl + Enter 提交</span>
           </div>
+          <div class="field">
+            <label class="sr-only" for="question">输入问题</label>
+            <textarea id="question" rows="3" maxlength="2000" placeholder="例如：跨月的红字确认单要怎么处理才能正常开票？"></textarea>
+            <div class="field-foot">
+              <span id="questionCount" class="muted">0 / 2000</span>
+              <div class="field-actions">
+                <label class="inline-field" for="topK">
+                  召回片段
+                  <select id="topK">
+                    <option value="3">3</option>
+                    <option value="6" selected>6</option>
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                  </select>
+                </label>
+                <button id="askBtn" class="btn btn-primary" type="button">提问</button>
+              </div>
+            </div>
+          </div>
+          <div id="askError" class="notice notice-error hidden" role="alert"></div>
         </div>
+
         <div id="askResult" class="card result hidden">
-          <h2>回答</h2>
+          <div class="card-head">
+            <h2>回答</h2>
+            <div class="card-actions">
+              <button id="copyAnswer" class="btn btn-ghost" type="button">复制答案</button>
+            </div>
+          </div>
           <div id="answer" class="answer"></div>
-          <h2 class="mt">引用来源</h2>
-          <div id="sources"></div>
+          <div id="askMeta" class="result-meta"></div>
+          <h3 class="section-title">引用来源</h3>
+          <div id="sources" class="sources"></div>
         </div>
       </section>
 
-      <section id="panel-kb" class="panel">
+      <section id="panel-kb" class="panel" role="tabpanel" aria-labelledby="tab-kb">
         <div class="card">
-          <h2>添加知识</h2>
-          <label for="docTitle">文档名称</label>
-          <input id="docTitle" type="text" placeholder="例如：退货政策 v2" />
-          <label for="files">上传文件（可多选，支持 .txt / .md / .csv / .json / .html）</label>
-          <input id="files" type="file" multiple />
-          <label for="pageUrl">或填写网址，只抓取这一个页面（不整站爬取）</label>
-          <div class="row">
-            <input id="pageUrl" type="url" placeholder="https://example.com/article" style="flex:1" />
-            <button id="grabBtn" type="button">抓取并入库</button>
+          <div class="card-head">
+            <h2>添加知识</h2>
+            <span class="hint">入库前会自动做一轮规则清洗，切片后同时写入原文与向量</span>
           </div>
-          <label for="pasted">或直接粘贴正文</label>
-          <textarea id="pasted" rows="7" placeholder="把文档内容粘贴到这里；填写文档名称后点“入库”。上传文件时此处内容会作为另一篇文档一起入库。"></textarea>
-          <div class="row">
-            <button id="ingestBtn" class="primary" type="button">入库</button>
+
+          <div class="field">
+            <label for="docTitle">文档名称</label>
+            <input id="docTitle" type="text" placeholder="例如：退货政策 v2" />
+          </div>
+
+          <div class="mode-switch" role="tablist" aria-label="添加方式">
+            <button class="mode is-active" type="button" role="tab" aria-selected="true" data-mode="paste">粘贴正文</button>
+            <button class="mode" type="button" role="tab" aria-selected="false" data-mode="file">上传文件</button>
+            <button class="mode" type="button" role="tab" aria-selected="false" data-mode="url">网址抓取</button>
+          </div>
+
+          <div class="mode-body">
+            <div class="mode-panel is-active" data-panel="paste">
+              <label class="sr-only" for="pasted">粘贴正文</label>
+              <textarea id="pasted" rows="10" placeholder="把文档正文粘贴到这里。&#10;&#10;支持 .txt / .md / .csv / .json / .html 的内容；网页、Word、PDF 复制出来的排版噪声会在入库前被清掉。"></textarea>
+            </div>
+
+            <div class="mode-panel" data-panel="file">
+              <label class="dropzone" for="files">
+                <input id="files" type="file" multiple accept=".txt,.md,.markdown,.csv,.json,.html,.htm" />
+                <span class="dropzone-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 16V4m0 0L8 8m4-4 4 4" />
+                    <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+                  </svg>
+                </span>
+                <span class="dropzone-title">选择文件（可多选）</span>
+                <span class="dropzone-sub">.txt / .md / .csv / .json / .html</span>
+              </label>
+              <ul id="fileList" class="file-list"></ul>
+            </div>
+
+            <div class="mode-panel" data-panel="url">
+              <label class="sr-only" for="pageUrl">网页地址</label>
+              <input id="pageUrl" type="url" placeholder="https://example.com/help/return-policy" />
+              <p class="hint hint-block">
+                只抓这一个页面，不做整站爬取。靠 JavaScript 渲染的页面抓不到内容，请改用「粘贴正文」；需要登录的站点同样抓不到。
+              </p>
+            </div>
+          </div>
+
+          <div class="field-foot">
             <span id="ingestHint" class="muted"></span>
+            <button id="ingestBtn" class="btn btn-primary" type="button">入库</button>
           </div>
+          <div id="ingestError" class="notice notice-error hidden" role="alert"></div>
         </div>
+
         <div class="card">
-          <div class="row space">
+          <div class="card-head">
             <h2>已入库文档</h2>
-            <button id="refreshBtn" class="ghost" type="button">刷新</button>
+            <div class="card-actions">
+              <input id="docFilter" class="filter-input" type="search" placeholder="按名称筛选" aria-label="按名称筛选文档" />
+              <button id="refreshBtn" class="btn btn-ghost" type="button">刷新</button>
+            </div>
           </div>
-          <div id="docList" class="muted">加载中…</div>
+          <div id="docList" class="doc-list"></div>
         </div>
       </section>
     </main>
 
-    <div id="toast" class="toast hidden"></div>
-    <script src="/app.js"></script>
+    <footer class="footer">
+      <p>答案由第三方模型接口生成，仅供核对资料使用；每条结论都应回到引用来源逐句确认。</p>
+    </footer>
+
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
   </body>
 </html>

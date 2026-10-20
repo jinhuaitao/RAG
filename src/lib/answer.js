@@ -1,4 +1,5 @@
 import { HttpError } from "./http.js";
+import { chatCompletion } from "./llm.js";
 
 const SYSTEM_PROMPT = `你是一个严格依据知识库回答的助手。
 规则：
@@ -62,63 +63,13 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
     { role: "user", content: `【参考资料】\n${text}\n\n【问题】\n${question}${focus}` },
   ];
 
-  let response;
   const maxTokens = Math.min(4096, Number(env.CHAT_MAX_TOKENS) || 900);
-  try {
-    response = await env.AI.run(env.CHAT_MODEL, { messages, temperature: 0.2, max_tokens: maxTokens });
-  } catch (error) {
-    const message = String(error?.message ?? error);
-    if (/deprecat/i.test(message)) {
-      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 已下线：${message}`, {
-        hint: [
-          "Workers AI 会定期下线旧模型，换一个仍然在架的 ID 即可，不需要改代码",
-          "同架构的替代 ID 通常是在模型名后加量化后缀，例如 @cf/meta/llama-3.1-8b-instruct 对应 @cf/meta/llama-3.1-8b-instruct-fp8",
-          "可选清单：https://developers.cloudflare.com/workers-ai/models/ 里筛 Text Generation",
-          "改 wrangler.jsonc 的 CHAT_MODEL 后提交到 GitHub，控制台会自动重新部署",
-        ],
-      });
-    }
-    // Workers AI 按每个模型自己的 JSON Schema 校验请求体：completion 系的老模型只有 prompt 分支，
-    // 发 messages 就会撞到 oneOf，这里直接把「换了哪个字段」说清楚
-    if (/oneOf|not met|required properties|schema/i.test(message)) {
-      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 不接受 messages 请求体：${message}`, {
-        hint: [
-          "本 Worker 用 env.AI.run 发送 { messages, temperature, max_tokens }，要求模型的 schema 里有 messages 分支",
-          "只认 prompt 的是 completion 时代的老模型（例如 @cf/meta/llama-3.2-3b-instruct、llama-2 系列），换一个对话模型即可，不用改代码",
-          "在控制台 Workers AI → 模型页用同样的 messages 试跑一次，能跑通的 ID 就能直接用",
-          "在架清单：https://developers.cloudflare.com/workers-ai/models/ 里筛 Text Generation",
-        ],
-      });
-    }
-    if (/model|not found|invalid/i.test(message)) {
-      throw new HttpError(500, `生成模型 ${env.CHAT_MODEL} 调用失败：${message}`, {
-        hint: `登录账号后运行 npx wrangler ai models list 查看当前可用的 Text Generation 模型，把 wrangler.jsonc 里的 CHAT_MODEL 换成新的 ID（无需改代码）`,
-      });
-    }
-    throw new HttpError(502, `生成模型调用失败：${message}`);
-  }
-
-  const raw = response?.response ?? response?.result?.response ?? response?.reasoning_content ?? response?.result?.reasoning_content;
-  if (typeof raw !== "string" || !raw.trim()) {
-    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 返回格式异常`, { raw: JSON.stringify(response).slice(0, 400) });
-  }
-  // 推理模型把思考过程混在正文里返回：Cloudflare 的输出结构没有单独的 reasoning 字段，
-  // 只能在文本里找思考块标记（拼出来是为了避开标签字面量被工具层吃掉），取结束标记之后的部分当答案
-  const open = ["<", "think", ">"].join("");
-  const close = ["<", "/", "think", ">"].join("");
-  const end = raw.lastIndexOf(close);
-  if (end < 0 && raw.includes(open)) {
-    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 的思考过程没写完就被截断，正文为空`, {
-      hint: [
-        "思考过程的 token 也算在 CHAT_MAX_TOKENS 里，当前配置是 " + maxTokens,
-        "把 wrangler.jsonc 的 CHAT_MAX_TOKENS 调到 2500–3000 再部署试试（无需改代码）",
-        "提示里已限制 500 字，但思考长度仍由模型自己决定",
-      ],
-    });
-  }
-  const answer = (end < 0 ? raw : raw.slice(end + close.length).replace(/^[\s:：]+/, "")).trim();
+  const result = await chatCompletion(env, { messages, temperature: 0.2, maxTokens });
+  const answer = result.content.trim();
   if (!answer) {
-    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 的思考过程之后没有正文`, { hint: `调大 wrangler.jsonc 的 CHAT_MAX_TOKENS（当前 ${maxTokens}）后重试` });
+    throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 没有返回正文`, {
+      hint: `调大 wrangler.jsonc 的 CHAT_MAX_TOKENS（当前 ${maxTokens}）后重试`,
+    });
   }
   const used = blocks.map((group, index) => ({
     index: index + 1,
@@ -130,5 +81,5 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
     lexical: Math.max(...group.map((p) => p.lexical)),
     excerpt: group.map((p) => p.content).join("\n").slice(0, 300),
   }));
-  return { answer, used };
+  return { answer, used, usage: result.usage, model: result.model };
 }

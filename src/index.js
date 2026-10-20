@@ -7,6 +7,7 @@ import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
 import { extractTerms, keywordTerms, overlapScore, rankCandidates, stripOverlap } from "./lib/rank.js";
 import { generateAnswer } from "./lib/answer.js";
 import { initialize, provisionStatus } from "./lib/setup.js";
+import { apiHost, isConfigured } from "./lib/llm.js";
 
 const TOP_K_LIMIT = 20;
 const RECALL_POOL_MAX = 24;
@@ -53,11 +54,13 @@ async function status(env) {
     ok: true,
     auth_required: Boolean(env.ADMIN_TOKEN),
     provisioned: Boolean(provision.credentials && provision.database && provision.tables && provision.index),
+    llm_ready: isConfigured(env),
     provision,
     config: {
       embedding_model: env.EMBEDDING_MODEL,
       embedding_dimensions: Number(env.EMBEDDING_DIMENSIONS),
       chat_model: env.CHAT_MODEL,
+      api_host: apiHost(env),
       index_name: env.INDEX_NAME,
       database_name: env.DB_NAME,
       top_k: Number(env.TOP_K) || 6,
@@ -191,6 +194,8 @@ async function ask(env, request) {
     sources: result.used,
     timings,
     noContext: false,
+    usage: result.usage ?? null,
+    model: result.model ?? env.CHAT_MODEL,
     terms: terms.map((entry) => entry.term),
   });
 }

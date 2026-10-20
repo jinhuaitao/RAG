@@ -8,22 +8,21 @@
     "directory": "public",
     "binding": "ASSETS"
   },
-  "ai": {
-    "binding": "AI"
-  },
   // 故意不声明 d1_databases / vectorize：D1 与 Vectorize 由 Worker 自己通过 Cloudflare REST API 创建和读写，
   // 所以控制台连上 GitHub 就能首次部署成功，不需要预先填任何资源 ID。
+  // 也没有 ai 绑定：嵌入与生成都走第三方 OpenAI 兼容接口（API_URL + API_KEY）。
   "vars": {
     "ACCOUNT_ID": "",
     "DB_NAME": "rag-kb-db",
     "INDEX_NAME": "rag-kb-index",
-    "EMBEDDING_MODEL": "@cf/baai/bge-m3",
-    "EMBEDDING_DIMENSIONS": "1024",
+    // 第三方模型接口：API_URL 填到 /v1 这一层（也可在控制台改），API_KEY 必须是 Secret
+    "API_URL": "https://api.openai.com/v1",
+    "API_TIMEOUT_MS": "60000",
+    // 嵌入模型 ID 与维度必须与实际平台一致；换模型要同时改维度并重建索引
+    "EMBEDDING_MODEL": "text-embedding-3-small",
+    "EMBEDDING_DIMENSIONS": "1536",
     "EMBEDDING_METRIC": "cosine",
-    // 必须是 schema 里有 messages 分支的对话模型；completion 系的老模型（如 @cf/meta/llama-3.2-3b-instruct）只认 prompt，
-    // 用 env.AI.run 发 messages 会得到 5006 oneOf not met
-    "CHAT_MODEL": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-    // 推理模型的思考过程也算在输出额度里，900 会被思考吃满导致答案被截断
+    "CHAT_MODEL": "gpt-4o-mini",
     "CHAT_MAX_TOKENS": "1500",
     "TOP_K": "6",
     "CHUNK_MAX_CHARS": "600",

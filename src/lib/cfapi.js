@@ -29,7 +29,7 @@ export function credentials(env) {
     throw new HttpError(503, "缺少 Cloudflare API 凭据，Worker 无法访问 D1 / Vectorize", {
       hint: [
         "在 Workers 控制台 Settings → Variables and Secrets 里添加两个 Secret：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID",
-        "Token 权限需要：Workers Scripts Edit、Workers D1 Edit、Workers Vector Store Edit、Workers AI Read & Edit",
+        "Token 权限需要：Workers Scripts Edit、Workers D1 Edit、Workers Vector Store Edit（模型调用走第三方接口，不需要 Workers AI 权限）",
       ],
     });
   }

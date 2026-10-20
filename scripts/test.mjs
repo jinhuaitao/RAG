@@ -6,6 +6,7 @@ import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 import { generateAnswer } from "../src/lib/answer.js";
+import { apiBase, chatCompletion, embeddings, isConfigured } from "../src/lib/llm.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 import { chunkInsertStatements, groupStatements } from "../src/lib/store.js";
 
@@ -368,44 +369,176 @@ test("入库：语句分组不超过单次请求的条数与体积上限", () =>
 const THINK_OPEN = ["<", "think", ">"].join("");const THINK_CLOSE = ["<", "/", "think", ">"].join("");
 const RAG_PASSAGE = [{ docId: "a", title: "退货政策", ordinal: 0, content: "退货申请需要在签收后七天内提交，逾期不再受理。", score: 0.9, vector: 0.82, lexical: 0.7 }];
 
-test("生成：推理模型的思考块不显示给用户，输出上限读配置", async () => {
+const LLM_ENV = { API_URL: "https://api.example.com/v1", API_KEY: "sk-test" };
+
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+}
+
+async function withFetch(handler, fn) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => handler(String(url), options);
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+test("生成：第三方接口的思考块不显示给用户，输出上限读配置", async () => {
   const sent = {};
-  const env = {
-    CHAT_MODEL: "@cf/mock/r1",
-    MAX_CONTEXT_CHARS: "12000",
-    CHAT_MAX_TOKENS: "1500",
-    AI: {
-      run: async (model, inputs) => {
-        Object.assign(sent, inputs);
-        return { response: `${THINK_OPEN}先找期限再算天数${THINK_CLOSE}\n\n签收后七天内提交。[1]` };
-      },
+  const env = { ...LLM_ENV, CHAT_MODEL: "demo/r1", MAX_CONTEXT_CHARS: "12000", CHAT_MAX_TOKENS: "1500" };
+  const result = await withFetch(
+    async (url, options) => {
+      assert.equal(url, "https://api.example.com/v1/chat/completions", url);
+      const body = JSON.parse(options.body);
+      Object.assign(sent, body);
+      const content = THINK_OPEN + "先找期限再算天数" + THINK_CLOSE + "\n\n签收后七天内提交。[1]";
+      return jsonResponse({ choices: [{ message: { role: "assistant", content } }] });
     },
-  };
-  const result = await generateAnswer(env, { question: "退货要几天内提交？", passages: RAG_PASSAGE, terms: [{ term: "退货申请", weight: 5 }] });
+    () => generateAnswer(env, { question: "退货要几天内提交？", passages: RAG_PASSAGE, terms: [{ term: "退货申请", weight: 5 }] })
+  );
   assert.equal(result.answer, "签收后七天内提交。[1]", result.answer);
   assert.equal(sent.max_tokens, 1500, "上限要读 CHAT_MAX_TOKENS，默认值不够推理模型用");
-  assert.equal(sent.messages[1].content.includes("【重点词】退货申请"), true, "重点词进提示");
+  assert.equal(sent.model, "demo/r1");
+  assert.ok(sent.messages[1].content.includes("【重点词】退货申请"), "重点词进提示");
   assert.deepEqual(result.used[0].chunks, [1], "来源片段号从 1 开始，与参考资料里的编号一致");
 });
 
 test("生成：思考过程被截断时报错引导调额度，而不是把思考当答案", async () => {
-  const env = { CHAT_MODEL: "@cf/mock/r1", MAX_CONTEXT_CHARS: "12000", AI: { run: async () => ({ response: `${THINK_OPEN}一路推下去还没写完` }) } };
+  const env = { ...LLM_ENV, CHAT_MODEL: "demo/r1", MAX_CONTEXT_CHARS: "12000", CHAT_MAX_TOKENS: "1500" };
   let thrown;
-  try {
-    await generateAnswer(env, { question: "逾期怎么办？", passages: RAG_PASSAGE, terms: [] });
-  } catch (error) {
-    thrown = error;
-  }
+  await withFetch(
+    async () => jsonResponse({ choices: [{ message: { role: "assistant", content: THINK_OPEN + "一路推下去还没写完" } }] }),
+    async () => {
+      try {
+        await generateAnswer(env, { question: "逾期怎么办？", passages: RAG_PASSAGE, terms: [] });
+      } catch (error) {
+        thrown = error;
+      }
+    }
+  );
   assert.equal(thrown?.status, 502, JSON.stringify(thrown?.message));
   assert.ok(String(JSON.stringify(thrown.details)).includes("CHAT_MAX_TOKENS"), JSON.stringify(thrown.details));
 });
 
 test("生成：没有片段时不调用模型", async () => {
   let called = 0;
-  const env = { CHAT_MODEL: "@cf/mock/r1", AI: { run: async () => (called += 1, { response: "不该被调用" }) } };
-  const result = await generateAnswer(env, { question: "随便问", passages: [], terms: [] });
+  const env = { ...LLM_ENV, CHAT_MODEL: "demo/chat" };
+  const result = await withFetch(
+    async () => {
+      called += 1;
+      return jsonResponse({});
+    },
+    () => generateAnswer(env, { question: "随便问", passages: [], terms: [] })
+  );
   assert.equal(called, 0);
   assert.equal(result.empty, true);
+});
+
+test("第三方接口：地址只补一次 /v1，带版本段与带路径的原样使用", () => {
+  assert.equal(apiBase({ API_URL: "https://api.openai.com" }), "https://api.openai.com/v1");
+  assert.equal(apiBase({ API_URL: "https://api.openai.com/v1" }), "https://api.openai.com/v1");
+  assert.equal(apiBase({ API_URL: "https://api.openai.com/v1/" }), "https://api.openai.com/v1");
+  assert.equal(apiBase({ API_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1" }), "https://dashscope.aliyuncs.com/compatible-mode/v1");
+  assert.equal(apiBase({ API_URL: "https://api.deepseek.com" }), "https://api.deepseek.com/v1");
+  assert.equal(apiBase({ API_URL: "https://api.example.com/v1/chat/completions" }), "https://api.example.com/v1");
+  assert.equal(apiBase({ API_URL: "https://api.example.com/v1/embeddings" }), "https://api.example.com/v1");
+});
+
+test("第三方接口：没配地址或密钥时报错并给出配置指引", async () => {
+  assert.throws(() => apiBase({}), (error) => error.status === 503 && /API_URL/.test(error.message));
+  await withFetch(
+    async () => jsonResponse({}),
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion({ API_URL: "https://api.example.com/v1", CHAT_MODEL: "demo/chat" }, { messages: [{ role: "user", content: "hi" }] });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.equal(thrown?.status, 503);
+      assert.ok(/API_KEY/.test(thrown.message), thrown?.message);
+    }
+  );
+  assert.equal(isConfigured({ API_URL: "https://x/v1", API_KEY: "k" }), true);
+  assert.equal(isConfigured({ API_URL: "https://x/v1" }), false);
+});
+
+test("第三方接口：嵌入按 index 排序返回向量", async () => {
+  const vectors = await withFetch(
+    async (url, options) => {
+      assert.equal(url, "https://api.example.com/v1/embeddings", url);
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body.input, ["甲", "乙"]);
+      assert.equal(body.model, "demo-embed");
+      return jsonResponse({
+        data: [
+          { index: 1, embedding: [0.3, 0.4] },
+          { index: 0, embedding: [0.1, 0.2] },
+        ],
+      });
+    },
+    () => embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "demo-embed" }, ["甲", "乙"])
+  );
+  assert.deepEqual(vectors, [[0.1, 0.2], [0.3, 0.4]]);
+});
+
+test("第三方接口：上游只认 max_completion_tokens 时自动降级重试", async () => {
+  const bodies = [];
+  const result = await withFetch(
+    async (url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (body.max_tokens !== undefined) {
+        const message = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.";
+        return jsonResponse({ error: { message } }, 400);
+      }
+      return jsonResponse({ choices: [{ message: { role: "assistant", content: "可以。" } }] });
+    },
+    () => chatCompletion({ ...LLM_ENV, CHAT_MODEL: "demo/o3" }, { messages: [{ role: "user", content: "hi" }], maxTokens: 800 })
+  );
+  assert.equal(result.content, "可以。");
+  assert.equal(bodies.length, 2, `应降级重试一次，实际 ${bodies.length} 次`);
+  assert.equal(bodies[1].max_completion_tokens, 800);
+  assert.equal(bodies[1].max_tokens, undefined);
+});
+
+test("第三方接口：401 翻译成可照着做的中文提示", async () => {
+  await withFetch(
+    async () => jsonResponse({ error: { message: "Incorrect API key provided" } }, 401),
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion({ ...LLM_ENV, CHAT_MODEL: "demo/chat" }, { messages: [{ role: "user", content: "hi" }] });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.equal(thrown?.status, 502);
+      assert.ok(/鉴权失败/.test(thrown.message), thrown?.message);
+      assert.ok(String(thrown.details.hint).includes("API_KEY"), JSON.stringify(thrown.details));
+    }
+  );
+});
+
+test("第三方接口：上游的普通 400 不做无谓重试，直接把原因抛出来", async () => {
+  let calls = 0;
+  await withFetch(
+    async () => {
+      calls += 1;
+      return jsonResponse({ error: { message: "maximum context length is 8192 tokens" } }, 400);
+    },
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion({ ...LLM_ENV, CHAT_MODEL: "demo/chat" }, { messages: [{ role: "user", content: "hi" }] });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.equal(calls, 1, "不该反复重试");
+      assert.ok(/maximum context length/.test(thrown.message), thrown?.message);
+    }
+  );
 });
 
 let failed = 0;

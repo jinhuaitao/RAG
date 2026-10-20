@@ -1,200 +1,423 @@
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "rag-kb-token";
+const MODE_LABELS = { paste: "入库正文", file: "上传并入库", url: "抓取并入库" };
+const ORIGIN_LABELS = { upload: "文件上传", paste: "粘贴", url: "网址抓取" };
 
-const state = { token: localStorage.getItem(TOKEN_KEY) || "", busy: false, status: null, counts: null };
-$("token").value = state.token;
+const state = {
+  token: localStorage.getItem(TOKEN_KEY) || "",
+  status: null,
+  counts: null,
+  documents: [],
+  mode: "paste",
+  filter: "",
+};
 
-function headers(extra) {
-  const h = { ...extra };
-  if (state.token) h.authorization = `Bearer ${state.token}`;
-  return h;
+class ApiError extends Error {
+  constructor(message, hints = []) {
+    super(message);
+    this.hints = hints;
+  }
+}
+
+function toHints(raw) {
+  if (Array.isArray(raw)) return raw.filter(Boolean).map(String);
+  if (typeof raw === "string" && raw.trim()) return [raw.trim()];
+  return [];
 }
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
   let response;
   try {
-    response = await fetch(path, { ...options, headers: headers(options.headers) });
+    response = await fetch(path, { ...options, headers });
   } catch (error) {
-    throw new Error(`网络请求失败：${error.message}`);
+    throw new ApiError(`网络请求失败：${error.message}`);
   }
+  const text = await response.text();
   let body = null;
   try {
-    body = await response.json();
+    body = text ? JSON.parse(text) : null;
   } catch {
-    if (!response.ok) throw new Error(`接口 ${path} 返回 HTTP ${response.status}`);
-    throw new Error(`接口 ${path} 返回了非 JSON 内容`);
+    body = null;
   }
   if (!response.ok) {
-    const raw = body?.hint ?? body?.details?.hint ?? "";
-    const hint = Array.isArray(raw) ? raw.join(" ") : raw;
-    throw new Error(`${body?.error || `HTTP ${response.status}`}${hint ? `｜${hint}` : ""}`);
+    const detail = body?.details || {};
+    throw new ApiError(body?.error || `接口 ${path} 返回 HTTP ${response.status}`, toHints(detail.hint ?? body?.hint));
   }
   return body;
 }
 
-function toast(message, isError = false) {
-  const el = $("toast");
-  el.textContent = message;
-  el.className = `toast${isError ? " error" : ""}`;
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.add("hidden"), isError ? 12000 : 4000);
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
-function setBusy(busy, hintEl, text) {
-  state.busy = busy;
-  if (hintEl) hintEl.textContent = text || (busy ? "处理中，请稍候…" : "");
-  $("askBtn").disabled = busy;
-  $("ingestBtn").disabled = busy;
-  $("grabBtn").disabled = busy;
+function svgIcon(paths, size = 22) {
+  const wrap = document.createElement("span");
+  wrap.className = "empty-icon";
+  wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  return wrap;
 }
 
-function renderTopLine(counts) {
+/* ---------------- 提示浮层 ---------------- */
+function toast(message, kind = "info") {
+  const box = el("div", `toast${kind === "error" ? " is-error" : kind === "success" ? " is-success" : ""}`);
+  box.appendChild(el("span", "toast-text", message));
+  const close = el("button", "toast-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", "关闭提示");
+  const remove = () => {
+    box.remove();
+    clearTimeout(timer);
+  };
+  close.addEventListener("click", remove);
+  box.appendChild(close);
+  $("toasts").appendChild(box);
+  const timer = setTimeout(remove, kind === "error" ? 9000 : 4200);
+  return box;
+}
+
+function showNotice(target, error) {
+  const hints = error instanceof ApiError ? error.hints : [];
+  target.textContent = "";
+  target.appendChild(el("div", "notice-title", error.message));
+  if (hints.length) {
+    const list = el("ul", "notice-list");
+    for (const hint of hints) list.appendChild(el("li", "", hint));
+    target.appendChild(list);
+  }
+  target.classList.remove("hidden");
+}
+
+function clearNotice(target) {
+  target.textContent = "";
+  target.classList.add("hidden");
+}
+
+function setBusy(button, busy, busyText) {
+  if (busy) {
+    button.dataset.label = button.textContent;
+    button.textContent = busyText || "处理中…";
+    button.classList.add("is-busy");
+    button.disabled = true;
+  } else {
+    if (button.dataset.label) button.textContent = button.dataset.label;
+    delete button.dataset.label;
+    button.classList.remove("is-busy");
+    button.disabled = false;
+  }
+}
+
+// 模型接口没配好时，问答与入库都不可用：按钮置灰，把原因写在 title 与顶部横幅里
+function applyReadiness() {
+  const ready = Boolean(state.status?.llm_ready);
+  for (const id of ["askBtn", "ingestBtn"]) {
+    const button = $(id);
+    if (button.classList.contains("is-busy")) continue;
+    button.disabled = !ready;
+    button.title = ready ? "" : "先在页面上方配置第三方模型接口（API_URL / API_KEY）";
+  }
+}
+
+/* ---------------- 状态栏 ---------------- */
+function renderStatus() {
   const status = state.status;
-  if (!status) return;
-  if (counts) state.counts = counts;
-  const c = status.config;
+  const chips = $("statChips");
+  chips.textContent = "";
+  if (!status) {
+    $("statusLine").textContent = "正在连接服务…";
+    return;
+  }
+
   const parts = [];
   if (state.counts) parts.push(`${state.counts.docs} 篇文档 · ${state.counts.chunks} 个片段`);
-  parts.push(`嵌入 ${c.embedding_model}（${c.embedding_dimensions} 维）`);
-  parts.push(status.auth_required ? "已开启鉴权" : "未配置 ADMIN_TOKEN");
+  if (status.config.api_host) parts.push(`接口 ${status.config.api_host}`);
+  parts.push(`嵌入 ${status.config.embedding_model}（${status.config.embedding_dimensions} 维）`);
+  parts.push(`生成 ${status.config.chat_model}`);
   $("statusLine").textContent = parts.join(" · ");
+
+  const dot = (cls) => el("span", `chip-dot ${cls}`);
+  const ready = status.provisioned && status.llm_ready;
+  const readyChip = el("span", "chip");
+  readyChip.append(dot(ready ? "is-ok" : "is-warn"), document.createTextNode(ready ? "服务就绪" : "待配置"));
+  chips.appendChild(readyChip);
+
+  if (state.counts) {
+    const docs = el("span", "chip");
+    docs.append(el("b", "", String(state.counts.docs)), document.createTextNode(" 篇文档"));
+    chips.appendChild(docs);
+  }
+
+  const model = el("span", "chip", status.config.chat_model);
+  model.title = `嵌入 ${status.config.embedding_model} · 生成 ${status.config.chat_model}`;
+  chips.appendChild(model);
+
+  const auth = el("span", "chip");
+  auth.append(dot(status.auth_required ? "is-ok" : "is-warn"), document.createTextNode(status.auth_required ? "已鉴权" : "未设令牌"));
+  chips.appendChild(auth);
 }
 
-// 只按 [数字] 拆分并生成节点，正文始终用 textContent 插入，避免文档内容注入 HTML
-function renderAnswer(target, text, sourceCount) {
+function renderBanners() {
+  const status = state.status;
+  const host = $("banners");
+  host.textContent = "";
+  host.hidden = true;
+  if (!status) return;
+
+  const banner = (title, text, options = {}) => {
+    const box = el("div", `banner${options.warn ? " is-warn" : ""}`);
+    const body = el("div", "banner-body");
+    body.appendChild(el("div", "banner-title", title));
+    const paragraph = el("div", "banner-text");
+    for (const part of options.parts || [text]) {
+      const line = el("p");
+      for (const chunk of String(part).split(/(`[^`]+`)/)) {
+        if (chunk.startsWith("`") && chunk.endsWith("`")) {
+          line.appendChild(el("code", "banner-code", chunk.slice(1, -1)));
+        } else if (chunk) {
+          line.appendChild(document.createTextNode(chunk));
+        }
+      }
+      paragraph.appendChild(line);
+    }
+    body.appendChild(paragraph);
+    box.appendChild(body);
+    if (options.action) {
+      const actions = el("div", "banner-actions");
+      const button = el("button", `btn ${options.action.primary === false ? "btn-ghost" : "btn-primary"}`, options.action.label);
+      button.type = "button";
+      button.addEventListener("click", options.action.onClick);
+      actions.appendChild(button);
+      box.appendChild(actions);
+    }
+    host.appendChild(box);
+    host.hidden = false;
+  };
+
+  if (!status.llm_ready) {
+    banner("还差一步：配置模型接口", "", {
+      parts: [
+        "本服务不使用 Cloudflare Workers AI，嵌入与生成都走你自己的第三方模型接口。请在 Workers 控制台 Settings → Variables and Secrets 里添加：",
+        "变量 API_URL —— 第三方平台的接口根地址，例如 https://api.openai.com/v1",
+        "Secret API_KEY —— 第三方平台的密钥",
+        "改完点 Retry deployment 重新部署，再回来点「重新检查」。",
+      ],
+      action: { label: "重新检查", primary: false, onClick: () => loadStatus() },
+    });
+  }
+
+  if (!status.provisioned) {
+    const missing = [];
+    if (!status.provision.credentials) missing.push("CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID");
+    if (!status.provision.database) missing.push(`D1 数据库 ${status.config.database_name}`);
+    if (!status.provision.tables) missing.push("documents / chunks 两张表");
+    if (!status.provision.index) missing.push(`Vectorize 索引 ${status.config.index_name}`);
+    banner("还差一步：初始化资源", "", {
+      parts: [
+        `缺少：${missing.join("、")}。`,
+        status.provision.credentials
+          ? "点右侧按钮，Worker 会自己建库、建表、建向量索引，几秒钟完成，重复点不会重复创建。"
+          : "先在 Workers 控制台添加 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID 两个 Secret，再回来点按钮。",
+      ],
+      action: { label: "初始化资源", onClick: runSetup },
+    });
+  }
+
+  if (!status.auth_required) {
+    banner("还没有配置访问令牌", "", {
+      warn: true,
+      parts: [
+        "除状态查询外，所有接口都要求令牌。请在 Workers 控制台添加 Secret ADMIN_TOKEN，",
+        "然后在页面右上角填入同一个值并保存。",
+      ],
+    });
+  }
+}
+
+/* ---------------- 回答与来源 ---------------- */
+function focusSource(index) {
+  const box = document.getElementById(`source-${index}`);
+  if (!box) return;
+  box.scrollIntoView({ behavior: "smooth", block: "center" });
+  box.classList.add("is-flash");
+  setTimeout(() => box.classList.remove("is-flash"), 1800);
+}
+
+function renderAnswer(target, text, hasSources) {
   target.textContent = "";
-  for (const part of String(text).split(/(\[\d+\])/)) {
+  for (const part of String(text).split(/(\[\d+\])/g)) {
     if (/^\[\d+\]$/.test(part)) {
-      const span = document.createElement("span");
-      span.className = "cite";
-      span.textContent = part;
-      target.appendChild(span);
+      const chip = el("button", "cite", part);
+      chip.type = "button";
+      chip.title = "跳到对应来源";
+      chip.addEventListener("click", () => focusSource(Number(part.slice(1, -1))));
+      target.appendChild(chip);
     } else if (part) {
       target.appendChild(document.createTextNode(part));
     }
   }
-  if (!sourceCount) {
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.textContent = "（本次没有召回到任何片段）";
-    target.appendChild(note);
+  if (!hasSources) {
+    target.appendChild(el("p", "muted answer-empty", "（本次没有召回到任何片段）"));
   }
 }
 
 function renderSources(target, sources) {
   target.textContent = "";
   if (!sources?.length) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "无引用来源。";
-    target.appendChild(p);
+    const empty = el("div", "empty");
+    empty.appendChild(svgIcon('<path d="M4 5h16v14H4z"/><path d="M8 10h8M8 14h5"/>'));
+    empty.appendChild(el("div", "empty-title", "没有引用来源"));
+    empty.appendChild(el("div", "empty-text", "这次提问没有召回到足够相关的片段。可以换成资料里的原词再问一次，或调大「召回片段」。"));
+    target.appendChild(empty);
     return;
   }
+
   for (const source of sources) {
-    const box = document.createElement("div");
-    box.className = "source";
+    const box = el("div", "source");
+    box.id = `source-${source.index}`;
 
-    const head = document.createElement("header");
-    const num = document.createElement("span");
-    num.className = "num";
-    num.textContent = `[${source.index}]`;
-    const title = document.createElement("strong");
-    title.textContent = source.title;
-    const score = document.createElement("span");
-    score.className = "muted";
-    const chunks = `片段 ${source.chunks.join("、")}`;
-    const lexical = ` · 关键词命中 ${Math.round(source.lexical * 100)}%`;
-    score.textContent = `综合 ${source.score.toFixed(3)} · 语义 ${source.vector.toFixed(2)}${lexical} · ${chunks}`;
-    head.append(num, title, score);
+    const head = el("div", "source-head");
+    head.appendChild(el("span", "source-num", String(source.index)));
+    head.appendChild(el("span", "source-title", source.title));
+    const tags = el("div", "source-tags");
+    tags.appendChild(el("span", "tag tag-score", `综合 ${source.score.toFixed(3)}`));
+    tags.appendChild(el("span", "tag tag-chunk", `片段 ${source.chunks.join("、")}`));
+    head.appendChild(tags);
+    box.appendChild(head);
 
-    const excerpt = document.createElement("div");
-    excerpt.className = "excerpt";
-    excerpt.textContent = source.excerpt + (source.excerpt?.length >= 300 ? " …" : "");
+    const meter = el("div", "source-meter");
+    const fill = el("span");
+    fill.style.width = `${Math.max(4, Math.min(100, source.score * 100))}%`;
+    meter.appendChild(fill);
+    box.appendChild(meter);
 
-    box.append(head, excerpt);
+    const excerpt = source.excerpt || "";
+    box.appendChild(el("p", "source-excerpt", excerpt + (excerpt.length >= 300 ? " …" : "")));
+
+    const detail = el("div", "source-detail");
+    const add = (label, value) => {
+      const item = el("span");
+      item.append(`${label} `, el("b", "", value));
+      detail.appendChild(item);
+    };
+    add("语义分", source.vector.toFixed(3));
+    add("关键词命中", `${Math.round(source.lexical * 100)}%`);
+    box.appendChild(detail);
+
     target.appendChild(box);
   }
 }
 
-function renderDocs(target, documents) {
+function renderMeta(data) {
+  const host = $("askMeta");
+  host.textContent = "";
+  const item = (label, value, warn = false) => {
+    const node = el("span", `meta-item${warn ? " is-warn" : ""}`);
+    node.append(el("b", "", label), document.createTextNode(value));
+    return node;
+  };
+  host.appendChild(item("候选", `${data.timings.candidates} 个片段`));
+  host.appendChild(item("采用", `${data.sources.length} 个来源`));
+  host.appendChild(item("耗时", `${data.timings.totalMs} ms`));
+  if (data.usage?.total_tokens) host.appendChild(item("Token", `${data.usage.total_tokens}`));
+  if (data.model) host.appendChild(item("模型", data.model));
+  if (data.noContext) host.appendChild(item("状态", "资料不足，未调用模型", true));
+}
+
+/* ---------------- 文档列表 ---------------- */
+function formatTime(value) {
+  if (!value) return "";
+  const date = new Date(`${String(value).replace(" ", "T")}Z`);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderDocs() {
+  const target = $("docList");
   target.textContent = "";
-  target.classList.remove("muted");
-  if (!documents.length) {
-    target.classList.add("muted");
-    target.textContent = "还没有文档。在上方粘贴或上传内容后点“入库”。";
+  const keyword = state.filter.trim().toLowerCase();
+  const docs = keyword ? state.documents.filter((doc) => doc.title.toLowerCase().includes(keyword)) : state.documents;
+
+  if (!state.documents.length) {
+    const empty = el("div", "empty");
+    empty.appendChild(svgIcon('<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 16h4"/>'));
+    empty.appendChild(el("div", "empty-title", "知识库还是空的"));
+    empty.appendChild(el("div", "empty-text", "在「添加知识」里粘贴正文、上传文件或填一个网址，资料会被切片、嵌入并写入向量库，之后就能提问了。"));
+    target.appendChild(empty);
     return;
   }
-  for (const doc of documents) {
-    const row = document.createElement("div");
-    row.className = "doc";
 
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    const title = document.createElement("div");
-    title.className = "title";
-    title.textContent = doc.title;
-    const stats = document.createElement("div");
-    stats.className = "muted";
-    const originLabel = { upload: "文件上传", paste: "粘贴", url: "网址抓取" }[doc.origin] || doc.origin;
-    stats.textContent = `${doc.chunk_count} 个片段 · ${doc.char_count} 字 · ${originLabel} · ${doc.created_at}`;
-    meta.append(title, stats);
+  if (!docs.length) {
+    const empty = el("div", "empty");
+    empty.appendChild(svgIcon('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'));
+    empty.appendChild(el("div", "empty-title", "没有匹配的文档"));
+    empty.appendChild(el("div", "empty-text", `没有名称包含「${state.filter.trim()}」的文档。`));
+    target.appendChild(empty);
+    return;
+  }
 
-    const del = document.createElement("button");
-    del.className = "danger";
+  for (const doc of docs) {
+    const row = el("div", "doc");
+    const main = el("div", "doc-main");
+    main.appendChild(el("div", "doc-title", doc.title));
+
+    const meta = el("div", "doc-meta");
+    const origin = el("span", "origin", ORIGIN_LABELS[doc.origin] || doc.origin);
+    origin.dataset.origin = doc.origin;
+    meta.appendChild(origin);
+    meta.appendChild(el("span", "", `${doc.chunk_count} 个片段`));
+    meta.appendChild(el("span", "", `${doc.char_count} 字`));
+    meta.appendChild(el("span", "", formatTime(doc.created_at)));
+    main.appendChild(meta);
+
+    const del = el("button", "btn btn-danger", "删除");
     del.type = "button";
-    del.textContent = "删除";
     del.addEventListener("click", async () => {
       if (!confirm(`删除《${doc.title}》及其 ${doc.chunk_count} 个向量片段？`)) return;
       del.disabled = true;
       try {
         await api(`/api/documents/${doc.id}`, { method: "DELETE" });
-        toast(`已删除《${doc.title}》`);
+        toast(`已删除《${doc.title}》`, "success");
         await loadDocs();
       } catch (error) {
-        toast(error.message, true);
+        toast(error.message, "error");
         del.disabled = false;
       }
     });
 
-    row.append(meta, del);
+    row.append(main, del);
     target.appendChild(row);
   }
 }
 
-function missingList(provision) {
-  const missing = [];
-  if (!provision.credentials) missing.push("Worker 还缺少 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 两个 Secret");
-  if (!provision.database) missing.push(`D1 数据库 ${state.status.config.database_name}`);
-  if (!provision.tables) missing.push("documents / chunks 两张表");
-  if (!provision.index) missing.push(`Vectorize 索引 ${state.status.config.index_name}（${state.status.config.embedding_dimensions} 维）`);
-  return missing;
-}
-
-function renderSetup() {
-  const status = state.status;
-  const card = $("setup");
-  if (!status) return;
-  if (status.provisioned) {
-    card.classList.add("hidden");
-    return;
+function renderFiles() {
+  const list = $("fileList");
+  list.textContent = "";
+  const files = [...$("files").files];
+  for (const file of files) {
+    const item = el("li");
+    item.appendChild(el("span", "file-name", file.name));
+    item.appendChild(el("span", "file-size", formatSize(file.size)));
+    list.appendChild(item);
   }
-  card.classList.remove("hidden");
-  const missing = missingList(status.provision);
-  const prefix = status.provision.error ? `${status.provision.error}；缺失：` : "";
-  const credentialNote = status.provision.credentials
-    ? "点按钮即可创建，几秒钟后完成。"
-    : "先在 Workers 控制台 Settings → Variables and Secrets 添加 Secret：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID，然后回来点按钮。";
-  $("setupDetail").textContent = `${prefix}${missing.join("、")}。${credentialNote}`;
 }
 
+/* ---------------- 动作 ---------------- */
 async function loadStatus() {
   try {
     state.status = await api("/api/status");
-    renderTopLine();
-    renderSetup();
-    if (!state.status.auth_required) {
-      toast("未配置 ADMIN_TOKEN：除状态接口外所有功能都被拒绝。请在控制台 Settings → Variables and Secrets 添加 Secret ADMIN_TOKEN", true);
-    }
+    renderStatus();
+    renderBanners();
+    applyReadiness();
   } catch (error) {
     $("statusLine").textContent = `服务状态获取失败：${error.message}`;
   }
@@ -202,109 +425,84 @@ async function loadStatus() {
 
 async function loadDocs() {
   const target = $("docList");
-  target.textContent = "加载中…";
   try {
     const data = await api("/api/documents");
-    renderDocs(target, data.documents);
-    renderTopLine(data.counts);
+    state.documents = data.documents || [];
+    state.counts = data.counts || null;
+    renderDocs();
+    renderStatus();
   } catch (error) {
-    target.classList.add("muted");
-    target.textContent = `加载失败：${error.message}`;
+    target.textContent = "";
+    showNotice(target, error);
+    toast(error.message, "error");
   }
 }
 
 async function runSetup() {
-  setBusy(true, $("setupHint"));
+  const button = $("banners").querySelector(".banner-actions .btn");
+  if (button) setBusy(button, true, "初始化中…");
   try {
     const data = await api("/api/admin/setup", { method: "POST" });
-    $("setupHint").textContent = data.steps.map((s) => `${s.step}:${s.action}`).join(" · ");
-    toast("资源已就绪，可以开始入库了");
-    setBusy(false, $("setupHint"));
+    const detail = (data.steps || []).map((step) => `${step.step} ${step.action}`).join(" · ");
+    toast(`资源已就绪${detail ? `（${detail}）` : ""}`, "success");
     await Promise.all([loadStatus(), loadDocs()]);
   } catch (error) {
-    setBusy(false, $("setupHint"));
-    toast(error.message, true);
+    toast(error.message, "error");
+    if (button) setBusy(button, false);
   }
 }
 
 async function submitAsk() {
   const question = $("question").value.trim();
-  if (!question) return toast("请先输入问题", true);
-  setBusy(true, $("askHint"));
+  if (!question) {
+    toast("请先输入问题", "error");
+    $("question").focus();
+    return;
+  }
+  const button = $("askBtn");
+  setBusy(button, true, "检索中…");
+  clearNotice($("askError"));
   try {
     const data = await api("/api/ask", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question, topK: Number($("topK").value) }),
     });
-    renderAnswer($("answer"), data.answer, data.sources.length);
+    renderAnswer($("answer"), data.answer, data.sources.length > 0);
     renderSources($("sources"), data.sources);
+    renderMeta(data);
     $("askResult").classList.remove("hidden");
-    setBusy(false, $("askHint"), `候选 ${data.timings.candidates} 个片段 → 采用 ${data.sources.length} 个来源 · ${data.timings.totalMs} ms${data.noContext ? " · 没有足够相关的资料" : ""}`);
+    $("askResult").scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
-    toast(error.message, true);
-    setBusy(false, $("askHint"));
+    showNotice($("askError"), error);
+    $("askResult").classList.add("hidden");
+  } finally {
+    setBusy(button, false);
   }
 }
 
 async function submitIngest() {
+  const button = $("ingestBtn");
+  const title = $("docTitle").value.trim();
   const pasted = $("pasted").value.trim();
   const files = [...$("files").files];
-  if (!pasted && !files.length) return toast("请上传文件或粘贴正文", true);
-
-  const jobs = files.map((file) => ({ title: file.name.replace(/\.[^.]+$/, ""), textPromise: file.text() }));
-  if (pasted) jobs.unshift({ title: $("docTitle").value.trim() || "粘贴的文档", textPromise: Promise.resolve(pasted) });
-
-  setBusy(true, $("ingestHint"));
-  let done = 0;
-  let failed = 0;
-  let dropped = 0;
-  let merged = 0;
-  let before = 0;
-  let after = 0;
-  for (const job of jobs) {
-    $("ingestHint").textContent = `入库中 ${done + failed + 1}/${jobs.length}：${job.title}`;
-    try {
-      const text = await job.textPromise;
-      const data = await api("/api/documents", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: job.title, text }),
-      });
-      done += 1;
-      const stats = data.cleaned;
-      if (stats) {
-        dropped += stats.droppedLines;
-        merged += stats.mergedLines;
-        before += stats.before;
-        after += stats.after;
-      }
-      $("ingestHint").textContent = `《${data.title}》已切成 ${data.chunkCount} 个片段`;
-    } catch (error) {
-      failed += 1;
-      toast(`${job.title} 入库失败：${error.message}`, true);
-    }
-  }
-  const optimized =
-    dropped || merged ? `；资料已优化 ${before} → ${after} 字（去掉 ${dropped} 行噪声、合并 ${merged} 处断行）` : "";
-  setBusy(false, $("ingestHint"), `入库完成：成功 ${done} 篇${failed ? `，失败 ${failed} 篇` : ""}${optimized}`);
-  $("pasted").value = "";
-  $("files").value = "";
-  $("docTitle").value = "";
-  toast(`入库完成：成功 ${done} 篇${failed ? `，失败 ${failed} 篇` : ""}`, failed > 0 && done === 0);
-  await Promise.all([loadDocs(), loadStatus()]);
-}
-
-async function submitUrl() {
   const url = $("pageUrl").value.trim();
-  if (!url) return toast("请先填写网址", true);
-  const hint = $("ingestHint");
-  setBusy(true, hint);
-  hint.textContent = `抓取中：${url}`;
+
+  let body;
+  if (state.mode === "paste") {
+    if (!pasted) return toast("请先粘贴要入库的正文", "error");
+    body = { title: title || "未命名文档", text: pasted };
+  } else if (state.mode === "file") {
+    if (!files.length) return toast("请先选择要上传的文件", "error");
+    body = { title: title || files[0].name.replace(/\.[^.]+$/, ""), text: await files[0].text() };
+  } else {
+    if (!url) return toast("请先填写要抓取的网址", "error");
+    body = title ? { url, title } : { url };
+  }
+
+  setBusy(button, true, "入库中…");
+  clearNotice($("ingestError"));
   try {
-    const body = { url };
-    const title = $("docTitle").value.trim();
-    if (title) body.title = title;
     const data = await api("/api/documents", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -312,43 +510,99 @@ async function submitUrl() {
     });
     const stats = data.cleaned;
     const optimized = stats && stats.before > stats.after ? `，资料已优化 ${stats.before} → ${stats.after} 字` : "";
-    setBusy(false, hint, `《${data.title}》已切成 ${data.chunkCount} 个片段${optimized}`);
+    toast(`《${data.title}》已入库，切成 ${data.chunkCount} 个片段${optimized}`, "success");
+    $("pasted").value = "";
+    $("files").value = "";
     $("pageUrl").value = "";
     $("docTitle").value = "";
+    renderFiles();
     await Promise.all([loadDocs(), loadStatus()]);
   } catch (error) {
-    setBusy(false, hint);
-    toast(`网址抓取失败：${error.message}`, true);
+    showNotice($("ingestError"), error);
+  } finally {
+    setBusy(button, false);
   }
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
-    document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${tab.dataset.tab}`));
-  });
+/* ---------------- 事件 ---------------- */
+function selectTab(name) {
+  for (const tab of document.querySelectorAll(".seg")) {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of document.querySelectorAll(".panel")) {
+    panel.classList.toggle("is-active", panel.id === `panel-${name}`);
+  }
+}
+
+function selectMode(mode) {
+  state.mode = mode;
+  for (const button of document.querySelectorAll(".mode")) {
+    const active = button.dataset.mode === mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of document.querySelectorAll(".mode-panel")) {
+    panel.classList.toggle("is-active", panel.dataset.panel === mode);
+  }
+  $("ingestBtn").textContent = MODE_LABELS[mode];
+  if ($("ingestBtn").dataset.label) $("ingestBtn").dataset.label = MODE_LABELS[mode];
+}
+
+document.querySelectorAll(".seg").forEach((tab) => {
+  tab.addEventListener("click", () => selectTab(tab.dataset.tab));
+});
+
+document.querySelectorAll(".mode").forEach((button) => {
+  button.addEventListener("click", () => selectMode(button.dataset.mode));
 });
 
 $("saveToken").addEventListener("click", () => {
   state.token = $("token").value.trim();
   if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
   else localStorage.removeItem(TOKEN_KEY);
-  toast(state.token ? "令牌已保存在本地" : "已清空令牌");
+  toast(state.token ? "令牌已保存在本地浏览器" : "已清空令牌");
   loadStatus();
   loadDocs();
 });
 
+$("token").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("saveToken").click();
+});
+
 $("askBtn").addEventListener("click", submitAsk);
-$("setupBtn").addEventListener("click", runSetup);
+$("question").addEventListener("input", (event) => {
+  $("questionCount").textContent = `${event.target.value.length} / 2000`;
+});
 $("question").addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.key === "Enter") && event.target === $("question")) submitAsk();
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitAsk();
 });
+
+$("copyAnswer").addEventListener("click", async () => {
+  const text = $("answer").textContent.trim();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("答案已复制到剪贴板", "success");
+  } catch {
+    toast("复制失败，请手动选中文本复制", "error");
+  }
+});
+
 $("ingestBtn").addEventListener("click", submitIngest);
-$("grabBtn").addEventListener("click", submitUrl);
 $("pageUrl").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") submitUrl();
+  if (event.key === "Enter") submitIngest();
 });
+$("files").addEventListener("change", renderFiles);
 $("refreshBtn").addEventListener("click", loadDocs);
 
+$("docFilter").addEventListener("input", (event) => {
+  state.filter = event.target.value;
+  renderDocs();
+});
+
+$("token").value = state.token;
+selectMode("paste");
 loadStatus();
 loadDocs();

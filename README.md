@@ -2,10 +2,10 @@
 
 一个**在 Cloudflare 网页控制台连上 GitHub 就部署完成**的检索增强问答（RAG）服务：上传或粘贴文档，向量化存进 Vectorize，提问时召回相关片段并让大模型**只依据你的资料**作答，回答里的 `[1]` 可点开核对原文。
 
-全程不需要本地安装 wrangler，不需要 GitHub Actions，也不需要任何第三方 API Key：
+全程不需要本地安装 wrangler，不需要 GitHub Actions，只需要一个**第三方 OpenAI 兼容接口**（地址 + 密钥）：
 
 - **Workers** 跑逻辑，**Workers Assets** 直出前端单页（零构建步骤）
-- **Workers AI** 做嵌入与生成（小模型免费额度够用，大模型按 token 计费）
+- **第三方模型接口**（`API_URL` + `API_KEY`）做嵌入与生成：OpenAI、DeepSeek、硅基流动、通义千问 compatible-mode、OneAPI/NewAPI 聚合站、Ollama 都能直接用
 - **D1** 存文档与切片原文，**Vectorize** 存向量
 - 首次部署后，Worker **自己调用 Cloudflare REST API 建库、建表、建向量索引**——点一下页面上的「初始化资源」按钮就完成，无需手填任何资源 ID
 
@@ -14,7 +14,7 @@
              │  POST /api/admin/setup  建 D1 库 → 建表 → 建 Vectorize 索引（幂等）
              │  POST /api/documents    切片 → 嵌入 → upsert 向量 + 存原文
              │  POST /api/ask          问题嵌入 → 向量检索 → 取原文 → 生成回答
-             ├─▶ env.AI                Workers AI 绑定（嵌入 / 生成）
+             ├─▶ API_URL + API_KEY     第三方 OpenAI 兼容接口（/embeddings、/chat/completions）
              ├─▶ env.ASSETS            public/ 里的问答页面
              └─▶ Cloudflare REST API   D1 + Vectorize（用两个 Secret 鉴权，见下文）
 ```
@@ -71,9 +71,9 @@ Cloudflare 控制台 → **Workers & Pages → Create → Workers → Get starte
 https://rag-kb.<你的账号子域>.workers.dev
 ```
 
-这一步一定能成功——`wrangler.jsonc` 只声明了 AI 与 Assets 两个绑定，没有需要预先存在的资源 ID。
+这一步一定能成功——`wrangler.jsonc` 只声明了 Assets 一个绑定，没有需要预先存在的资源 ID。
 
-### 第 3 步：加三个 Secret
+### 第 3 步：配三个 Secret 和模型接口
 
 先造一个 API Token：控制台右上角头像 → **My Profile → API Tokens → Create Token → Edit Cloudflare Workers** 模板，确认包含下列权限，Account 范围选你的账号：
 
@@ -82,15 +82,20 @@ https://rag-kb.<你的账号子域>.workers.dev
 | `Account · Workers Scripts: Edit` | Git 集成部署 Worker |
 | `Account · Workers D1: Edit` | 建库、建表、读写文档 |
 | `Account · Workers Vector Store: Edit` | 建索引、写入与检索向量 |
-| `Account · Workers AI: Read & Edit` | 调用嵌入与生成模型 |
 
-然后到 **Workers & Pages → rag-kb → Settings → Variables and Secrets → Variables**，把下面三项的**类型选 Secret**（不是 Text）后保存：
+然后到 **Workers & Pages → rag-kb → Settings → Variables and Secrets → Variables**，添加下面几项：
 
-| 名称 | 值 |
-| --- | --- |
-| `CLOUDFLARE_API_TOKEN` | 上面造的 Token |
-| `CLOUDFLARE_ACCOUNT_ID` | 控制台右侧栏 **Account ID**（也可在任意页面 URL 里看到） |
-| `ADMIN_TOKEN` | 你自己定的随机长字符串，访问页面时要用它登录。生成一个：`openssl rand -hex 24` |
+| 名称 | 类型 | 值 |
+| --- | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | **Secret** | 上面造的 Token |
+| `CLOUDFLARE_ACCOUNT_ID` | **Secret** | 控制台右侧栏 **Account ID**（也可在任意页面 URL 里看到） |
+| `ADMIN_TOKEN` | **Secret** | 你自己定的随机长字符串，访问页面时要用它登录。生成一个：`openssl rand -hex 24` |
+| `API_URL` | Text | 第三方接口根地址，填到 `/v1` 这一层，例如 `https://api.openai.com/v1`、`https://api.deepseek.com/v1`、`https://api.siliconflow.cn/v1` |
+| `API_KEY` | **Secret** | 第三方平台的密钥 |
+
+`API_KEY` 必须选 **Secret** 类型（Text 会被任何拿到部署权限的人读到）；`API_URL` 用 Text 即可，它不是机密。
+
+`API_URL` 只填根地址，不要带 `/chat/completions` 之类的完整端点——直接粘完整端点也能用，Worker 会自动截掉。`EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` / `CHAT_MODEL` 三个值在仓库的 `wrangler.jsonc` 里已经给了 OpenAI 的默认值，换平台时改这三个（换嵌入模型必须同时改维度，见[换模型 / 换维度](#换模型--换维度)）。
 
 改完如果状态未生效，去 **Deployments → 最新一次 → Retry deployment** 重跑一次即可。
 
@@ -98,12 +103,12 @@ https://rag-kb.<你的账号子域>.workers.dev
 
 ### 第 4 步：点「初始化资源」
 
-打开 Worker 地址，页面顶部会有「还差一步：初始化资源」横幅。
+打开 Worker 地址，页面顶部会有「还差一步：初始化资源」横幅（若 `API_URL` / `API_KEY` 还没配好，会同时出现「还差一步：配置模型接口」横幅，按里面的提示补齐再点「重新检查」）。
 
 1. 右上角填入 `ADMIN_TOKEN` → **保存**（只存在浏览器 localStorage）
 2. 点 **初始化资源**
 
-Worker 会依次创建 D1 数据库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（1024 维 / cosine），几秒后横幅消失，顶部状态栏显示「0 篇文档 · 0 个片段 · …」。这个动作**幂等**，重复点只会跳过已存在的资源。
+Worker 会依次创建 D1 数据库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（按 `EMBEDDING_DIMENSIONS` 建，默认 1536 维 / cosine），几秒后横幅消失，顶部状态栏显示「0 篇文档 · 0 个片段 · …」。这个动作**幂等**，重复点只会跳过已存在的资源。
 
 命令行等价：
 
@@ -175,22 +180,22 @@ npm install
 npm run preview      # → http://127.0.0.1:8790 ，访问令牌 mock-token
 ```
 
-`preview` 启动的是**离线端到端模拟**：内存版 D1 + 向量库 + 假 Workers AI，并且**自带一个假的 Cloudflare REST API 服务**（端口 8791），所以「初始化资源 → 入库 → 问答 → 删除」整条真实代码路径都能在完全不登录、不花额度的情况下跑通。数据重启即清空。
+`preview` 启动的是**离线端到端模拟**：内存版 D1 + 向量库 + **一个假的 OpenAI 兼容接口**（和假的 Cloudflare REST API 同进程，端口 8791），所以「初始化资源 → 入库 → 问答 → 删除」整条真实代码路径都能在完全不登录、不花额度的情况下跑通。数据重启即清空。
 
 想调真实资源：
 
 ```bash
-cp .dev.vars.example .dev.vars    # 填三个 Secret 的值
+cp .dev.vars.example .dev.vars    # 填几个 Secret 的值
 npx wrangler login
 npm run dev                       # wrangler dev --remote
 ```
 
-注意 `npm run dev` 连的是**你账号里真实的** D1 / Vectorize / Workers AI：入库和初始化会真的建资源、消耗额度。日常调试建议用 `preview`。
+注意 `npm run dev` 连的是**你账号里真实的** D1 / Vectorize，并且会真的调用你配置的第三方接口：入库和初始化会真的建资源、消耗额度。日常调试建议用 `preview`。
 
 其他脚本：
 
 ```bash
-npm test           # 单元与逻辑测试：切片 / 清洗 / 向量序列化 / 网址抓取内网拦截 / HTML 抽正文
+npm test           # 单元与逻辑测试：切片 / 清洗 / 向量序列化 / 网址抓取内网拦截 / HTML 抽正文 / 模型接口层
 npm run check      # 全部 JS 语法检查
 npm run schema:dump# 由 src/lib/schema.js 重新导出 schema.sql
 npm run deploy     # 只部署代码，不建资源
@@ -204,6 +209,7 @@ AUTH='authorization: Bearer <ADMIN_TOKEN>'
 
 # 状态（唯一免鉴权接口）：是否已初始化、文档/片段数、生效配置
 curl -s $BASE/api/status
+# → {"ok":true,"provisioned":false,"llm_ready":true,"config":{"embedding_model":"text-embedding-3-small","embedding_dimensions":1536,"chat_model":"gpt-4o-mini","api_host":"api.openai.com",…}}
 
 # 初始化资源（幂等）：建 D1 库 + 两张表 + Vectorize 索引
 curl -s -X POST $BASE/api/admin/setup -H "$AUTH"
@@ -213,7 +219,7 @@ curl -s -X POST $BASE/api/documents -H "$AUTH" -H 'content-type: application/jso
   -d '{"title":"退货政策","text":"退货申请需在签收后七天内提交……"}'
 # → {"ok":true,"docId":"…","title":"退货政策","chunkCount":4,
 #    "cleaned":{"before":1204,"after":913,"droppedLines":5,"mergedLines":8},
-#    "embedding":{"count":4,"model":"@cf/baai/bge-m3","dimensions":1024,"mutations":["…"]}}
+#    "embedding":{"count":4,"model":"text-embedding-3-small","dimensions":1536,"mutations":["…"]}}
 
 # 入库（上传文件，multipart）
 curl -s -X POST $BASE/api/documents -H "$AUTH" -F 'file=@手册.md'
@@ -231,23 +237,28 @@ curl -s -X DELETE $BASE/api/documents/<docId> -H "$AUTH"
 # 问答
 curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
   -d '{"question":"退货申请要在几天内提交？","topK":4}'
-# → {"answer":"…[1]","sources":[{"index":1,"title":"退货政策","chunks":[2],"score":0.82,"vector":0.61,"lexical":0.9,"excerpt":"…"}],"timings":{"candidates":13,"totalMs":120},"terms":["退货申请","提交"]}
+# → {"answer":"…[1]","sources":[{"index":1,"docId":"…","title":"退货政策","chunks":[2],"score":0.82,"vector":0.61,"lexical":0.9,"excerpt":"…"}],"timings":{"candidates":13,"totalMs":120},"usage":{"prompt_tokens":820,"completion_tokens":96,"total_tokens":916},"model":"gpt-4o-mini","terms":["退货申请","提交"]}
 ```
 
-除 `/api/status` 外全部要求令牌；出错时返回 `{"error":"中文说明","details":{"hint":"下一步该做什么"}}`，HTTP 码遵循 400/401/404/405/413/415/5xx。
+除 `/api/status` 外全部要求令牌；出错时返回 `{"error":"中文说明","details":{"hint":"下一步该做什么"}}`，HTTP 码遵循 400/401/404/405/413/415/429/5xx。上游第三方接口的失败也会被翻成中文提示（401/403 → 鉴权失败，404 → 地址或模型不存在，429 → 限流或额度不足），`details.hint` 里直接写清楚下一步该改什么。
 
 ## 配置项
 
-都在 `wrangler.jsonc` 的 `vars` 里（不涉及密钥），改完重新部署生效——控制台路径下就是往仓库提一次 commit。
+`wrangler.jsonc` 的 `vars` 里放不涉及密钥的项（改完重新部署生效——控制台路径下就是往仓库提一次 commit）；涉及密钥的三项走控制台的 **Secret**。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
+| `API_URL` | `https://api.openai.com/v1` | 第三方接口根地址。域名下没有版本段时会自动补 `/v1`；直接粘完整端点（`…/chat/completions`）也会被自动截掉 |
+| `API_KEY` | 无（Secret） | 第三方平台密钥。没配时问答与入库会返回 503 并给出配置指引 |
+| `API_TIMEOUT_MS` | `60000` | 调用第三方接口的超时（5–300 秒） |
+| `API_KEY_HEADER` | `authorization` | 密钥放在哪个请求头。少数平台要 `x-api-key` 时改这里 |
+| `API_KEY_PREFIX` | `Bearer ` | 密钥前缀。平台要裸 Key（不带 `Bearer `）时改成空字符串 |
 | `DB_NAME` | `rag-kb-db` | D1 数据库名，初始化按这个名字创建/查找 |
 | `INDEX_NAME` | `rag-kb-index` | Vectorize 索引名 |
-| `EMBEDDING_MODEL` | `@cf/baai/bge-m3` | 嵌入模型，多语言，适合中文资料 |
-| `EMBEDDING_DIMENSIONS` | `1024` | **必须与索引维度一致**，初始化时用它建索引 |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | 嵌入模型 ID，填第三方平台上的实际名称（`BAAI/bge-m3`、`bge-large-zh-v1.5` 等） |
+| `EMBEDDING_DIMENSIONS` | `1536` | **必须与模型的实际输出维度一致**，初始化时用它建索引 |
 | `EMBEDDING_METRIC` | `cosine` | 距离度量 |
-| `CHAT_MODEL` | `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | 生成模型。**必须换成 schema 里有 `messages` 分支的对话模型**——只认 `prompt` 的 completion 老模型（如 `@cf/meta/llama-3.2-3b-instruct`）会报 5006 `oneOf not met`；它是推理模型，按 token 计费，见[额度](#额度) |
+| `CHAT_MODEL` | `gpt-4o-mini` | 生成模型 ID（`deepseek-chat`、`qwen-plus`、`moonshot-v1-8k` 等） |
 | `CHAT_MAX_TOKENS` | `1500` | 生成上限（1–4096）。推理模型的思考过程也吃这份额度，太小会被截断成「只有思考没有正文」，页面会提示调大这个值 |
 | `TOP_K` | `6` | 默认召回片段数，请求里可用 `topK` 覆盖（1–20） |
 | `CHUNK_MAX_CHARS` | `600` | 单切片目标长度（字符） |
@@ -259,9 +270,13 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | `ALLOW_PRIVATE_URLS` | `false` | 设为 `true` 才允许抓本机/内网网址，仅供调试；元数据地址不受它影响 |
 | `ACCOUNT_ID` | 空 | 备用；优先读 Secret `CLOUDFLARE_ACCOUNT_ID` |
 
+除了上表的键，Worker 还需要三个 Secret：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`ADMIN_TOKEN`，见[第 3 步](#第-3-步配三个-secret-和模型接口)。
+
 ## 换模型 / 换维度
 
-嵌入模型换了维度就变了，向量无法迁移，必须重建索引：
+**只换生成模型**（`CHAT_MODEL`）不影响已有向量，改完部署即可。
+
+**换嵌入模型**会改变向量维度，向量无法迁移，必须重建索引：
 
 1. 删掉旧索引（Vectorize 没有可靠的控制台入口，用 API 最稳）：
 
@@ -275,7 +290,9 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 3. 页面重新点**初始化资源**建新索引。
 4. 旧文档的向量已失效：在知识库列表里逐篇删除后重新入库。
 
-只换生成模型（`CHAT_MODEL`）不影响向量，改完部署即可。
+常用嵌入模型的维度：OpenAI `text-embedding-3-small` = 1536（`text-embedding-3-large` = 3072），`BAAI/bge-m3` = 1024，`BAAI/bge-large-zh-v1.5` = 1024。**维度填错会在入库时报「向量维度不匹配」**，这时按上面的步骤重建即可。
+
+换第三方平台时，除了模型名，通常还要一起改 `API_URL`、`API_KEY`，有时还有 `API_KEY_HEADER` / `API_KEY_PREFIX`（见[配置项](#配置项)）。
 
 ## 常见问题
 
@@ -288,8 +305,22 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 **入库报「向量维度不匹配」**
 `EMBEDDING_MODEL` 的输出维度 ≠ `EMBEDDING_DIMENSIONS`。查该模型的实际维度并改正，然后按[换模型 / 换维度](#换模型--换维度)重建。
 
-**问答报「生成模型 … 已下线 / 调用失败」**
-Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` 已于 2026-05-30 下线，错误码 5028）。这类问题不用改代码：把 `wrangler.jsonc` 的 `CHAT_MODEL` 换成仍在架的 ID 再提交即可，同架构通常加个量化后缀就能对上（`…-instruct` → `…-instruct-fp8`）。完整清单见 [workers-ai/models](https://developers.cloudflare.com/workers-ai/models/) 里的 Text Generation，或登录后运行 `npx wrangler ai models list`。中文资料想要更好效果，可换 Qwen / Gemma 一类多语言模型试试。
+**页面提示「还差一步：配置模型接口」/ 状态里 `llm_ready` 为 false**
+`API_URL` 或 `API_KEY` 没配好。到 **Settings → Variables and Secrets** 里加 `API_URL`（Text）和 `API_KEY`（**Secret**），保存后 Retry deployment，再点页面上的「重新检查」。`API_KEY` 没配时问答与入库都会返回 503，并附带上面这三步的操作提示。
+
+**问答报「第三方接口鉴权失败（HTTP 401）」**
+Key 不对、过期、或账户没余额。核对 `API_KEY` 有没有多复制到引号或空格；确认这个 Key 有权调用你配的 `EMBEDDING_MODEL` / `CHAT_MODEL`；部分平台要求 Key 形如 `sk-…`，填成别的格式会被拒。
+
+**入库报「第三方接口地址或模型不存在（HTTP 404）」**
+两种可能：`API_URL` 少了版本段（应为 `https://xxx/v1` 这样的根地址，不是 `…/chat/completions`），或 `EMBEDDING_MODEL` / `CHAT_MODEL` 的 ID 在这个平台上不存在。先用 `curl` 在本地试一次同一个模型名：
+
+```bash
+curl -s https://你的接口/v1/embeddings -H 'authorization: Bearer 你的KEY' \
+  -H 'content-type: application/json' -d '{"model":"你的嵌入模型","input":"测试"}'
+```
+
+**问答报「第三方接口限流或额度不足（HTTP 429）」**
+平台按分钟限流或账户余额见底。等一会儿重试，或在平台控制台充值；嵌入与生成是分别计费的，批量入库时尤其容易撞到嵌入的限额。
 
 **抓不到正文 / 报 422**
 只有服务端返回的 HTML 抓得到；靠 JavaScript 现渲染的页面（大多数 SPA、需要登录的站点、带反爬的站点）抓不到，返回 422 并提示改用「粘贴正文」——在浏览器里全选复制即可，效果一样。
@@ -308,11 +339,11 @@ Workers AI 会定期下线旧模型（例如 `@cf/meta/llama-3.1-8b-instruct` �
 **忘了 `ADMIN_TOKEN`**
 它只以 Secret 形式存在 Worker 侧，无法查看。在控制台 Settings 里删掉再设一个新值，页面右上角填新值即可，知识库数据不受影响。
 
-**问答报 5006：`oneOf at '/' not met, 0 matches: required properties … are 'prompt' / 'messages'`**
-`CHAT_MODEL` 换成了 completion 时代的老模型（`@cf/meta/llama-3.2-3b-instruct`、llama-2 系列等）。Workers AI 的 `env.AI.run` 会按**每个模型自己的 JSON Schema** 校验请求体，而本项目发的是 `{ messages, temperature, max_tokens }`，老模型的 schema 只接受单串 `prompt`，于是两条 oneOf 分支都不匹配。换一个在架的对话模型就行（`@cf/deepseek-ai/deepseek-r1-distill-qwen-32b`、`@cf/nvidia/nemotron-3-120b-a12b`、`@cf/meta/llama-3.3-70b-instruct-fp8-fast`），代码不用动；拿不准的话先在控制台 Workers AI 模型页用 messages 试跑一次。
+**问答报「第三方接口拒绝了这次请求（HTTP 400）」**
+多半是某个生成参数这个平台不认。Worker 已经做了逐级降级：先发 `{model, messages, temperature, max_tokens}`，被拒就改成 `{model, messages, max_completion_tokens}`，再被拒就只发 `{model, messages}`——所以「老平台只认 `max_completion_tokens`」「新推理模型不收 `temperature`」这类差异不用自己处理。若连最简请求都被拒，看提示里的请求地址，确认 `API_URL` 指向的是 OpenAI 兼容的接口根地址，而不是某个网页。
 
 **报「思考过程没写完就被截断，正文为空」，或者回答里混着一大段推理过程**
-默认的生成模型是推理模型，它会先输出一段思考文本，再给正文，而思考的 token 也算在 `CHAT_MAX_TOKENS`（默认 1500）里。思考太长就会被截断成「只有思考、没有正文」——这时按报错里的提示把 `CHAT_MAX_TOKENS` 调到 2500–3000。正常情况下 Worker 会把思考块剥掉再显示，只留正文；如果你换回非推理模型（llama 系），这个字段设回 900 就够了。
+推理模型（DeepSeek-R1 之类）会先输出一段思考文本，再给正文，而思考的 token 也算在 `CHAT_MAX_TOKENS`（默认 1500）里。思考太长就会被截断成「只有思考、没有正文」——这时按报错里的提示把 `CHAT_MAX_TOKENS` 调到 2500–3000。正常情况下 Worker 会把思考块剥掉再显示，只留正文；换用非推理模型（`gpt-4o-mini`、`qwen-plus` 等）时这个字段设回 900 就够了。
 
 **D1 或 Cloudflare API 报 `Invalid input: Expected object, received array`**
 D1 的公开 REST 端点 `POST /accounts/{account_id}/d1/database/{uuid}/query` 只认两种请求体：`{sql, params}` 或 `{batch: [{sql, params}, …}]`，**顶层必须是对象**。Cloudflare 自己的 workerd 内部绑定发的是裸数组，那是绑定格式，照搬到 REST 就会被拒。本项目已按 `{batch: […]}` 合批写入；如果响应里出现 `d1Sequential` 字段，说明这个端点在你的账号上仍拒批量请求体，Worker 会自动退回逐条执行——功能不受影响，只是每次入库多占几个子请求（子请求额度见上一条）。
@@ -324,7 +355,7 @@ Workers 每次请求能发起的**外部调用（子请求）**是有硬额度�
 - 调大 `CHUNK_MAX_CHARS`（例如 600 → 1200）直接减少片段数。
 
 **额度**
-Workers 免费计划含每天 10 万次请求；Workers AI 的免费用量按模型分配（嵌入与生成各有每日上限），**32B 以上这一档不参与免费额度，按 token 计费**：默认的 `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` 约 $0.497/百万输入、$4.881/百万输出，本项目每次提问约 6–8k 输入 + ≤1.5k 输出（思考过程也算输出），粗算 $0.01/次；要压成本就把 `CHAT_MODEL` 换成 `@cf/meta/llama-3.1-8b-instruct-fp8`（8B 档便宜得多，也没有思考长度不可控的问题）。Vectorize 免费计划可建索引并存放有限向量。规模化前请在控制台核对 Workers AI 与 Vectorize 的当前配额与单价说明。
+Workers 免费计划含每天 10 万次请求；Vectorize 免费计划可建索引并存放有限向量。模型费用走**第三方平台**，按平台自己的单价计费：嵌入按 token 计（每次入库 ≈ 片段数 × 数百 token），生成按 token 计（本项目每次提问约 6–8k 输入 + ≤1.5k 输出）。同一个平台上换更便宜的模型最直接——例如把 `CHAT_MODEL` 从旗舰推理模型换成 `gpt-4o-mini` / `deepseek-chat` / `qwen-turbo` 一类，一次提问的成本能降一个量级。规模化前请在第三方平台的控制台核对当前配额与单价说明；部分平台赠送的新客额度足够小规模试用，但**嵌入与生成分别计费**，批量入库时嵌入那一项往往先见底。
 
 ## 安全说明
 
@@ -338,12 +369,13 @@ Workers 免费计划含每天 10 万次请求；Workers AI 的免费用量按模
 ## 项目结构
 
 ```
-wrangler.jsonc           只声明 AI + Assets 绑定，以及所有可调参数
+wrangler.jsonc           只声明 Assets 绑定，以及所有可调参数
 schema.sql               由 src/lib/schema.js 导出的建表 SQL（仅作参考，运行时不读文件）
 src/index.js             路由、鉴权、参数校验，唯一的 HTTP 入口
 src/lib/cfapi.js         Cloudflare REST API 封装：D1 建库/查询、Vectorize 建索引/NDJSON 写入/检索/删除
 src/lib/setup.js         「初始化资源」的幂等逻辑与 provisioning 状态探测
 src/lib/store.js         通过 REST 读写 D1（切片原文按向量 id 回查）
+src/lib/llm.js           第三方 OpenAI 兼容接口：地址归一化、嵌入/生成调用、错误翻成中文提示
 src/lib/rag.js           嵌入、批量 upsert、向量检索、维度校验
 src/lib/rank.js          检索词抽取、关键词召回 SQL、两路分数合并重排、重叠去重
 src/lib/chunk.js         中英混合文本切片（段落 → 句子 → 重叠打包）与标题层级识别
@@ -353,9 +385,9 @@ src/lib/answer.js        中文系统提示词、上下文拼装、生成调用
 src/lib/http.js          JSON 响应、错误包装、请求体解析、令牌校验
 public/                  问答与知识库管理页面（原生 HTML/CSS/JS，无构建）
 fixtures/              示例网页，供本地端到端抓取与测试使用
-scripts/dev-mock.mjs     离线端到端模拟，含一个假的 Cloudflare REST API
+scripts/dev-mock.mjs     离线端到端模拟，含假的 Cloudflare REST API 与假的模型接口
 scripts/deploy.sh        附录 A 的命令行部署路径
-scripts/test.mjs         切片、清洗、网址抓取与检索重排的回归测试
+scripts/test.mjs         切片、清洗、网址抓取、检索重排与模型接口层的回归测试
 scripts/check.sh         语法检查
 .github/workflows/       附录 B 的 GitHub Actions 部署路径
 ```
@@ -368,21 +400,27 @@ scripts/check.sh         语法检查
 export CLOUDFLARE_API_TOKEN=<Token>
 export CLOUDFLARE_ACCOUNT_ID=<Account ID>
 export ADMIN_TOKEN=<自定义访问令牌>
+export API_KEY=<第三方平台密钥>
 npm install
 bash scripts/deploy.sh      # 等价 npm run setup
 ```
 
-脚本做三件事：`wrangler deploy` → 把上述三个环境变量写成 Secret → 打印剩下的浏览器步骤。未提供的变量会被跳过并提示。
+脚本做三件事：`wrangler deploy` → 把上述环境变量写成 Secret → 打印剩下的浏览器步骤。未提供的变量会被跳过并提示。
+
+`API_URL` 是普通变量不是密钥，留在 `wrangler.jsonc` 的 `vars` 里即可；也可以在控制台改，不用重新部署代码。
 
 ## 附录 B：GitHub Actions 自动部署
 
-仓库自带 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)：push 到 `main` 时跑语法检查与离线测试，然后 `wrangler deploy`。它**只部署代码**，不建资源（资源由 Worker 自己在页面里创建），因此只需要两个 Secret：
+仓库自带 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)：push 到 `main` 时跑语法检查与离线测试，然后 `wrangler deploy`。它**只部署代码**，不建资源（资源由 Worker 自己在页面里创建），因此只需要三个 Secret：
 
 仓库 → Settings → Secrets and variables → Actions → New repository secret：
 
 ```
 CLOUDFLARE_ACCOUNT_ID   = 你的 Account ID
 CLOUDFLARE_API_TOKEN    = 权限见第 3 步表格
+API_KEY                 = 第三方平台密钥
 ```
+
+`ADMIN_TOKEN` 与 `API_URL` 不在这个列表里：`ADMIN_TOKEN` 在控制台手动设一次即可，`API_URL` 是普通变量，跟代码一起在 `wrangler.jsonc` 里。
 
 与控制台连 Git 二选一即可，同时启用会互相覆盖同一个 Worker。

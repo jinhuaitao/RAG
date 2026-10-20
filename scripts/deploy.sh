@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 可选的命令行部署路径（README 附录）。主路径是在 Cloudflare 控制台连 GitHub 部署，不需要本脚本。
 # 用法：
-#   ADMIN_TOKEN=xxx CLOUDFLARE_API_TOKEN=yyy CLOUDFLARE_ACCOUNT_ID=zzz bash scripts/deploy.sh
+#   ADMIN_TOKEN=xxx API_KEY=yyy CLOUDFLARE_API_TOKEN=zzz CLOUDFLARE_ACCOUNT_ID=www bash scripts/deploy.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 W=npx
@@ -15,7 +15,7 @@ echo "==> 部署 Worker"
 $W wrangler deploy
 
 echo "==> 写入 Secrets（只写入环境变量里提供的项）"
-for name in ADMIN_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+for name in ADMIN_TOKEN API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
   value="${!name:-}"
   if [ -n "$value" ]; then
     printf '%s' "$value" | $W wrangler secret put "$name"
@@ -30,4 +30,6 @@ cat <<'EOF'
   1. 打开 Worker 的 workers.dev 地址，右上角填入 ADMIN_TOKEN 并保存
   2. 点页面上的「初始化资源」，Worker 会自动创建 D1 数据库、两张表和 Vectorize 索引
      （等价命令：curl -X POST $BASE/api/admin/setup -H "authorization: Bearer $ADMIN_TOKEN"）
+
+提示：API_URL 是普通变量，在 wrangler.jsonc 的 vars 里；换平台时改它和模型名即可。
 EOF

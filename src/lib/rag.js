@@ -1,23 +1,17 @@
 import { HttpError } from "./http.js";
 import { vectorize } from "./cfapi.js";
 import { chunkId } from "./store.js";
+import { embeddings } from "./llm.js";
 
 const EMBED_BATCH = 16;
 // Vectorize 单次写入上限 1000 条，但请求体本身也要留余量：1024 维一条约 11KB，50 条 ≈ 550KB
 const UPSERT_BATCH = 50;
 
 export async function embed(env, texts) {
-  if (!env.AI) {
-    throw new HttpError(503, "Worker 没有 AI 绑定", { hint: "检查 wrangler.jsonc 是否保留 ai = { binding: \"AI\" }，并重新部署" });
-  }
   const vectors = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
-    const response = await env.AI.run(env.EMBEDDING_MODEL, { text: batch });
-    const data = response?.data ?? response?.result?.data;
-    if (!Array.isArray(data) || data.length !== batch.length) {
-      throw new HttpError(502, `嵌入模型 ${env.EMBEDDING_MODEL} 返回异常：期望 ${batch.length} 条向量，实际 ${Array.isArray(data) ? data.length : "无"}`);
-    }
+    const data = await embeddings(env, batch);
     for (const vector of data) assertDimensions(env, vector);
     vectors.push(...data);
   }

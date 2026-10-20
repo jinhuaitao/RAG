@@ -167,8 +167,16 @@ function httpStatusError(href, status) {
       hint: "请在浏览器里打开并复制正文，再用“粘贴正文”入库",
     });
   }
-  if (status === 404) return new HttpError(404, `抓取 ${href} 返回 404：页面不存在或已移动`);
-  if (status === 429) return new HttpError(502, `抓取 ${href} 被限流（429），请稍后重试或改用粘贴正文`);
+  if (status === 404) {
+    return new HttpError(404, `抓取 ${href} 返回 404：页面不存在或已移动`, {
+      hint: "确认网址是否完整（末尾多余的斜杠或拼错的路径也会 404），或改用“粘贴正文”入库",
+    });
+  }
+  if (status === 429) {
+    return new HttpError(502, `抓取 ${href} 被限流（429），请稍后重试或改用粘贴正文`, {
+      hint: "目标站点限制了访问频率，等一会儿再试，或在浏览器里复制正文入库",
+    });
+  }
   return new HttpError(502, `抓取 ${href} 返回 ${status}`);
 }
 
