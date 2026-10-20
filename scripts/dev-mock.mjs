@@ -8,8 +8,11 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import worker from "../src/index.js";
+import { modelDimensions } from "../src/lib/models.js";
 
-const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1536);
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "mock/bge-m3";
+// 维度按模型名走（与 Worker 里一致）：已知模型不用手动配维度，未知模型才看 EMBEDDING_DIMENSIONS
+const DIMENSIONS = modelDimensions(EMBEDDING_MODEL) || Number(process.env.EMBEDDING_DIMENSIONS || 1536);
 // 假嵌入实际输出的维度：默认与配置一致。设成别的值可以模拟「模型维度与配置对不上」
 const EMBED_DIM = Number(process.env.MOCK_EMBED_DIM || DIMENSIONS);
 const APP_PORT = Number(process.argv[2]) || 8790;
@@ -54,10 +57,13 @@ function fakeEmbedding(text) {
 
 // 假的 /v1/models：聚合站都会给一份可用模型清单
 const MOCK_MODELS = ["mock/bge-m3", "BAAI/bge-large-zh-v1.5", "mock/llama", "mock/qwen-max"];
+// 模拟「平台只挂了对话渠道」：模型清单里没有向量模型，嵌入一律被拒
+const CHAT_ONLY = process.env.MOCK_CHAT_ONLY === "1";
 
 function mockModels(res) {
+  const models = CHAT_ONLY ? MOCK_MODELS.filter((id) => !/bge|embed/i.test(id)) : MOCK_MODELS;
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ object: "list", data: MOCK_MODELS.map((id) => ({ id, object: "model", owned_by: "mock" })) }));
+  res.end(JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model", owned_by: "mock" })) }));
 }
 
 // 假的 /v1/embeddings：返回 OpenAI 兼容的 data 数组
@@ -72,6 +78,11 @@ function mockEmbeddings(res, body) {
   if (payload.model && !/bge|embed/i.test(payload.model)) {
     return res.writeHead(400, { "content-type": "application/json" }),
       res.end(JSON.stringify({ errors: { message: `所有渠道均失败: mock [Key1/1]: HTTP 400 Embedding model not found: ${payload.model}` } }));
+  }
+  // 平台只有对话渠道：这个模型一个渠道都没挂上
+  if (CHAT_ONLY) {
+    return res.writeHead(503, { "content-type": "application/json" }),
+      res.end(JSON.stringify({ error: { message: `没有可用渠道支持模型 ${payload.model}`, code: "no_channel" } }));
   }
   const input = Array.isArray(payload.input) ? payload.input : [payload.input];
   const data = input.map((text, index) => ({ object: "embedding", index, embedding: fakeEmbedding(text) }));
@@ -327,7 +338,7 @@ const env = {
   API_URL: `http://127.0.0.1:${API_PORT}/v1`,
   API_KEY: LLM_KEY,
   API_TIMEOUT_MS: "60000",
-  EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || "mock/bge-m3",
+  EMBEDDING_MODEL: EMBEDDING_MODEL,
   EMBEDDING_DIMENSIONS: String(DIMENSIONS),
   EMBEDDING_METRIC: "cosine",
   EMBEDDING_PROVIDER: process.env.EMBEDDING_PROVIDER || "",

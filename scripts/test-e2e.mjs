@@ -273,6 +273,33 @@ test("端到端：嵌入走 Workers AI 时，入库与检索照常", async () =>
   assert.ok(!ask.body.noContext, JSON.stringify(ask.body));
 });
 
+test("端到端：bge-m3 只走 Workers AI，第三方平台没有向量模型也不影响入库", async () => {
+  stopMock();
+  // 平台上一个向量模型都没有，嵌入请求一律「没有可用渠道支持模型」
+  await startMock({ MOCK_CHAT_ONLY: "1", EMBEDDING_MODEL: "BAAI/bge-m3" });
+
+  const setup = await app("/api/admin/setup", { method: "POST" });
+  assert.equal(setup.status, 200, JSON.stringify(setup.body));
+
+  // 不用改任何变量：EMBEDDING_MODEL 还是那个平台上的名字
+  const ingest = await app("/api/documents", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "退货政策", text: POLICY }),
+  });
+  assert.equal(ingest.status, 201, JSON.stringify(ingest.body));
+  assert.ok(ingest.body.chunkCount >= 1, JSON.stringify(ingest.body));
+
+  const ask = await app("/api/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question: "退货申请几天内提交？" }),
+  });
+  assert.equal(ask.status, 200, JSON.stringify(ask.body));
+  assert.ok(ask.body.sources?.length, JSON.stringify(ask.body));
+  assert.ok(!ask.body.noContext, JSON.stringify(ask.body));
+});
+
 let failed = 0;
 try {
   for (const [name, fn] of cases) {

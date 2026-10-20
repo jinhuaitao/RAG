@@ -52,20 +52,20 @@ export function expectedDimensions(env) {
 
 // 第三方平台没有这个向量模型时，自动改走 Cloudflare 自带的 Workers AI。
 // 结论按 (平台, 模型) 记下来，同一批请求里不用每批都去撞一次墙。
-const embeddingFallback = new WeakMap();
+// 注意不能拿 env 当键：withDefaults() 每次请求都会造一个新的 env 对象。
+const embeddingFallback = new Set();
 
 function fallbackKey(env) {
-  return `${String(env.API_URL || "").trim()}|${String(env.EMBEDDING_MODEL || "").trim()}`;
+  const url = String(env.EMBEDDING_API_URL || env.API_URL || "").trim();
+  return `${url}|${String(env.EMBEDDING_MODEL || "").trim()}`;
 }
 
 function platformLacksVectorModel(env) {
-  return Boolean(embeddingFallback.get(env)?.has(fallbackKey(env)));
+  return embeddingFallback.has(fallbackKey(env));
 }
 
 function rememberPlatformLacksVectorModel(env) {
-  const state = embeddingFallback.get(env) ?? new Set();
-  state.add(fallbackKey(env));
-  embeddingFallback.set(env, state);
+  embeddingFallback.add(fallbackKey(env));
 }
 
 // 能不能自动改走 Workers AI：这个模型 Workers AI 上有，Worker 上也绑好了 AI
@@ -81,12 +81,20 @@ export function activeEmbeddingProvider(env) {
   return embeddingProvider(env);
 }
 
-// 嵌入走哪个提供方：EMBEDDING_PROVIDER 说了算；没写就看模型 ID——@cf/ 开头的是 Workers AI 的模型
+// 嵌入走哪个提供方，优先级从高到低：
+// 1) EMBEDDING_PROVIDER 说了算；2) 模型 ID 带 @cf/ 就是 Workers AI 的模型；
+// 3) 单独配了 EMBEDDING_API_URL 就走那个嵌入平台；
+// 4) Workers AI 上有的向量模型（bge 系列、multilingual-e5-large）直接走 Workers AI，
+//    不再去问第三方平台——那些平台本来就只挂了对话渠道，问了也是白问。
 export function embeddingProvider(env) {
   const explicit = String(env.EMBEDDING_PROVIDER || "").trim().toLowerCase();
   if (explicit === "workers-ai" || explicit === "workersai" || explicit === "cf") return "workers-ai";
   if (explicit === "third-party" || explicit === "thirdparty" || explicit === "openai") return "third-party";
-  return String(env.EMBEDDING_MODEL || "").trim().startsWith("@cf/") ? "workers-ai" : "third-party";
+  const model = String(env.EMBEDDING_MODEL || "").trim();
+  if (model.startsWith("@cf/")) return "workers-ai";
+  if (String(env.EMBEDDING_API_URL || "").trim()) return "third-party";
+  if (isWorkersAiEmbeddingModel(model)) return "workers-ai";
+  return "third-party";
 }
 
 // 有些聚合站只提供对话模型，没有向量模型；这时可以单独指定做嵌入的平台

@@ -209,7 +209,7 @@ function renderBanners() {
         "回答问题走你自己的第三方模型接口，请在 Workers 控制台 Settings → Variables and Secrets 里添加：",
         "变量 API_URL —— 第三方平台的接口根地址，例如 https://api.openai.com/v1",
         "Secret API_KEY —— 第三方平台的密钥",
-        "入库用的嵌入默认走同一个平台；那个平台上没有向量模型时，会自动改走 Cloudflare 自带的 Workers AI，不用另配密钥，也不用改 EMBEDDING_MODEL。",
+        "入库用的嵌入默认走同一个平台；EMBEDDING_MODEL 填 BAAI/bge-m3 这类 Workers AI 上有的向量模型时，直接走 Cloudflare 自带的 Workers AI，不用另配密钥。",
         "改完点 Retry deployment 重新部署，再回来点「重新检查」。",
       ],
       action: { label: "重新检查", primary: false, onClick: () => loadStatus() },

@@ -6,7 +6,7 @@ import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 import { generateAnswer } from "../src/lib/answer.js";
-import { apiBase, chatCompletion, embeddings, embeddingProvider, isConfigured } from "../src/lib/llm.js";
+import { apiBase, chatCompletion, embeddings, embeddingProvider, expectedDimensions, isConfigured } from "../src/lib/llm.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 import { chunkInsertStatements, groupStatements } from "../src/lib/store.js";
 import { DEFAULTS, withDefaults } from "../src/lib/config.js";
@@ -823,9 +823,17 @@ test("第三方接口：模型 ID 不在平台名单里时，列出平台上登�
 
 test("嵌入提供方：没写 EMBEDDING_PROVIDER 时按模型名判断", () => {
   assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3" }), "workers-ai", "@cf/ 开头是 Workers AI 的模型");
-  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3" }), "third-party");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3" }), "workers-ai", "Workers AI 上有的向量模型直接走 Workers AI");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "bge-m3" }), "workers-ai", "厂商前缀不影响判断");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "text-embedding-3-small" }), "third-party", "Workers AI 上没有的模型走第三方平台");
+  assert.equal(
+    embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3", EMBEDDING_API_URL: "https://embed.example.com/v1" }),
+    "third-party",
+    "单独配了嵌入平台就走那个平台"
+  );
   assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3", EMBEDDING_PROVIDER: "workers-ai" }), "workers-ai");
-  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3", EMBEDDING_PROVIDER: "third-party" }), "third-party");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3", EMBEDDING_PROVIDER: "third-party" }), "third-party", "显式指定优先");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3", EMBEDDING_PROVIDER: "third-party" }), "third-party", "显式指定优先");
 });
 
 test("Workers AI：嵌入走 Worker 上的 AI 绑定，一个 HTTP 请求都不发", async () => {
@@ -861,7 +869,6 @@ test("Workers AI：模型 ID 写成 BAAI/bge-m3 时补成平台上的完整名�
     {
       ...LLM_ENV,
       EMBEDDING_MODEL: "BAAI/bge-m3",
-      EMBEDDING_PROVIDER: "workers-ai",
       AI: {
         run: async (model) => {
           requested = model;
@@ -872,6 +879,35 @@ test("Workers AI：模型 ID 写成 BAAI/bge-m3 时补成平台上的完整名�
     ["测试"]
   );
   assert.equal(requested, "@cf/baai/bge-m3");
+});
+
+test("Workers AI：BAAI/bge-m3 只走 Workers AI，一个第三方请求都不发", async () => {
+  const calls = [];
+  let fetches = 0;
+  const vectors = await withFetch(
+    async () => {
+      fetches += 1;
+      throw new Error("bge-m3 只用 Workers AI，不该发第三方请求");
+    },
+    () =>
+      embeddings(
+        {
+          ...LLM_ENV,
+          EMBEDDING_MODEL: "BAAI/bge-m3",
+          AI: {
+            run: async (model, options) => {
+              calls.push({ model, text: options.text });
+              return { data: [[0.1, 0.2]], shape: [1, 2] };
+            },
+          },
+        },
+        ["退货政策"]
+      )
+  );
+  assert.equal(fetches, 0, "不该问第三方平台");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "@cf/baai/bge-m3");
+  assert.deepEqual(vectors, [[0.1, 0.2]]);
 });
 
 test("Workers AI：模型不存在时列出可用的向量模型并点名要改哪个变量", async () => {
@@ -898,17 +934,19 @@ test("Workers AI：模型不存在时列出可用的向量模型并点名要改�
 });
 
 test("Workers AI：Worker 上没有 AI 绑定时点名要改 wrangler.jsonc", async () => {
-  let thrown;
-  try {
-    await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "@cf/baai/bge-m3" }, ["测试"]);
-  } catch (error) {
-    thrown = error;
+  for (const model of ["@cf/baai/bge-m3", "BAAI/bge-m3"]) {
+    let thrown;
+    try {
+      await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: model }, ["测试"]);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, `应当报错：${model}`);
+    assert.ok(/没有绑定/.test(thrown.message), thrown?.message);
+    const hint = (thrown?.details?.hint ?? []).join(" | ");
+    assert.ok(/wrangler\.jsonc/.test(hint), hint);
+    assert.ok(/Retry deployment/.test(hint), hint);
   }
-  assert.ok(thrown, "应当报错");
-  assert.ok(/没有绑定/.test(thrown.message), thrown?.message);
-  const hint = (thrown?.details?.hint ?? []).join(" | ");
-  assert.ok(/wrangler\.jsonc/.test(hint), hint);
-  assert.ok(/Retry deployment/.test(hint), hint);
 });
 
 test("Workers AI：超长文本切开分别嵌入再取平均，不被 token 上限截断", async () => {
@@ -932,7 +970,42 @@ test("Workers AI：超长文本切开分别嵌入再取平均，不被 token 上
   assert.deepEqual(vectors[0], [1, 0], "同一段的多块向量取平均");
 });
 
-test("第三方接口：嵌入报「没有可用渠道」时，点名 Workers AI 这条路", async () => {
+test("第三方接口：显式指定第三方、而平台上没有这个向量模型时，自动改走 Workers AI", async () => {
+  const calls = [];
+  const env = {
+    ...LLM_ENV,
+    EMBEDDING_MODEL: "BAAI/bge-m3",
+    EMBEDDING_PROVIDER: "third-party",
+    AI: {
+      run: async (model, options) => {
+        calls.push({ model, text: options.text });
+        return { data: [[0.1, 0.2]], shape: [1, 2] };
+      },
+    },
+  };
+  let embedCalls = 0;
+  const vectors = await withFetch(
+    async (url) => {
+      if (url.endsWith("/embeddings")) {
+        embedCalls += 1;
+        return jsonResponse({ error: { message: "没有可用渠道支持模型 BAAI/bge-m3", code: "no_channel" } }, 503);
+      }
+      return jsonResponse({ data: [{ id: "DeepSeek-V4-Flash(AMD)" }] });
+    },
+    () => embeddings(env, ["测试"])
+  );
+  assert.equal(embedCalls, 1, "先问一次第三方平台");
+  assert.equal(calls.length, 1, "平台上没有这个向量模型就自动改走 Workers AI");
+  assert.equal(calls[0].model, "@cf/baai/bge-m3");
+  assert.deepEqual(vectors, [[0.1, 0.2]]);
+
+  // 结论记住了：同一个平台再嵌一次，不必再撞一次墙
+  await embeddings(env, ["再来一次"]);
+  assert.equal(embedCalls, 1, "同一个平台不用再试一次");
+  assert.equal(calls.length, 2, "第二次直接走 Workers AI");
+});
+
+test("第三方接口：平台上没有这个向量模型、Worker 又没绑定 AI 时，指点重新部署一次", async () => {
   await withFetch(
     async (url) => {
       if (url.endsWith("/models")) {
@@ -943,17 +1016,72 @@ test("第三方接口：嵌入报「没有可用渠道」时，点名 Workers AI
     async () => {
       let thrown;
       try {
-        await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "BAAI/bge-m3" }, ["测试"]);
+        // 换个平台：这个平台的结论没被记住，才轮得到这条错误
+        await embeddings(
+          {
+            ...LLM_ENV,
+            API_URL: "https://other.example.com/v1",
+            EMBEDDING_MODEL: "BAAI/bge-m3",
+            EMBEDDING_PROVIDER: "third-party",
+          },
+          ["测试"]
+        );
       } catch (error) {
         thrown = error;
       }
       assert.ok(thrown, "应当报错");
       assert.ok(/可用渠道/.test(thrown.message), thrown?.message);
       const hint = (thrown?.details?.hint ?? []).join(" | ");
-      assert.ok(/@cf\/baai\/bge-m3/.test(hint), hint);
       assert.ok(/Workers AI/.test(hint), hint);
+      assert.ok(/重新部署/.test(hint), hint);
+      assert.ok(/不用改 EMBEDDING_MODEL/.test(hint), hint);
+      assert.ok(/不用改 EMBEDDING_DIMENSIONS/.test(hint), hint);
     }
   );
+});
+
+test("第三方接口：聊天模型误填成嵌入模型时，不乱改走 Workers AI", async () => {
+  let aiCalls = 0;
+  let thrown;
+  await withFetch(
+    async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "DeepSeek-V4-Flash(AMD)" }] });
+      }
+      return jsonResponse({ error: { message: "没有可用渠道支持模型 DeepSeek-V4-Flash(AMD)", code: "no_channel" } }, 503);
+    },
+    async () => {
+      try {
+        await embeddings(
+          {
+            ...LLM_ENV,
+            EMBEDDING_MODEL: "DeepSeek-V4-Flash(AMD)",
+            AI: {
+              run: async () => {
+                aiCalls += 1;
+                return { data: [[0.1]], shape: [1, 1] };
+              },
+            },
+          },
+          ["测试"]
+        );
+      } catch (error) {
+        thrown = error;
+      }
+    }
+  );
+  assert.ok(thrown, "应当报错");
+  assert.equal(aiCalls, 0, "Workers AI 上没有这个模型，不该改走");
+  const hint = (thrown?.details?.hint ?? []).join(" | ");
+  assert.ok(/聊天模型不能用来做嵌入/.test(hint), hint);
+});
+
+test("向量维度：按模型名自动算，不用手动同步 EMBEDDING_DIMENSIONS", () => {
+  assert.equal(expectedDimensions({ EMBEDDING_MODEL: "BAAI/bge-m3" }), 1024, "厂商前缀不影响");
+  assert.equal(expectedDimensions({ EMBEDDING_MODEL: "bge-m3", EMBEDDING_DIMENSIONS: "1536" }), 1024, "已知模型按模型名走");
+  assert.equal(expectedDimensions({ EMBEDDING_MODEL: "@cf/baai/bge-m3" }), 1024);
+  assert.equal(expectedDimensions({ EMBEDDING_MODEL: "text-embedding-3-small" }), 1536);
+  assert.equal(expectedDimensions({ EMBEDDING_MODEL: "my-own-model", EMBEDDING_DIMENSIONS: "768" }), 768, "未知模型才用配置里的维度");
 });
 
 let failed = 0;

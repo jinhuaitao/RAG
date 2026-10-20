@@ -5,11 +5,12 @@
 - **不用装 wrangler、不用配 GitHub Actions**，浏览器里点完四步就上线
 - **零构建**：Workers 跑逻辑，Workers Assets 直出前端单页
 - **自己建资源**：部署后点一下「初始化资源」，Worker 调 Cloudflare REST API 建 D1 库、建表、建向量索引，不用手填任何资源 ID
-- **模型走第三方**：OpenAI / DeepSeek / 硅基流动 / 通义千问 compatible-mode / OneAPI-NewAPI 聚合站 / Ollama 都能直接用；嵌入也可以改走 Cloudflare 自带的 Workers AI
+- **模型走第三方**：OpenAI / DeepSeek / 硅基流动 / 通义千问 compatible-mode / OneAPI-NewAPI 聚合站 / Ollama 都能直接用；第三方平台上没有向量模型时，嵌入自动改走 Cloudflare 自带的 Workers AI
 
 ```
 浏览器 ──▶ Worker (src/index.js)
              ├─▶ API_URL + API_KEY    第三方接口（embeddings / chat）
+             ├─▶ env.AI               Workers AI 向量模型（绑定随部署自动带上）
              ├─▶ env.ASSETS           前端单页（public/）
              └─▶ Cloudflare REST API  D1 + Vectorize
 ```
@@ -113,10 +114,12 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | 场景 | 怎么配 |
 | --- | --- |
 | 平台既有对话模型也有向量模型 | 不用配，嵌入与生成都走 `API_URL` / `API_KEY` |
-| 平台只有对话模型（DeepSeek 这类本身没有嵌入 API） | 不用配：Worker 会发现这个平台上没有向量模型，自动改走 Cloudflare 自带的 **Workers AI**（同一个模型，维度也一样） |
+| 平台只有对话模型（DeepSeek 这类本身没有嵌入 API） | 不用配：`EMBEDDING_MODEL` 填 `BAAI/bge-m3` 这类 Workers AI 上有的向量模型，嵌入**直接走 Cloudflare 自带的 Workers AI**，不去问第三方平台 |
 | 想让嵌入固定走另一个平台 | 加 `EMBEDDING_API_URL` + `EMBEDDING_API_KEY`（另一个能嵌入的平台），`EMBEDDING_MODEL` 填它的向量模型 |
 
-> 自动改走只对 Workers AI 上有的向量模型生效（bge 系列、`multilingual-e5-large`）。平台上没有、Workers AI 上也没有时，才需要另配一个嵌入平台。
+判定顺序：`EMBEDDING_PROVIDER` 说了算 → 模型 ID 带 `@cf/` 就是 Workers AI → 配了 `EMBEDDING_API_URL` 就走那个嵌入平台 → `BAAI/bge-m3` 这类 Workers AI 上有的向量模型走 Workers AI → 其余走 `API_URL` 那个平台。
+
+> Workers AI 上的向量模型：bge 系列（`bge-m3`、`bge-large-zh-v1.5`、`bge-small-zh-v1.5`、`bge-base-zh-v1.5`、英文版四种）与 `multilingual-e5-large`。模型名和平台对不上时也不怕——`BAAI/bge-m3`、`bge-m3`、`@cf/baai/bge-m3` 指的都是同一个模型。
 
 ### 单独一个嵌入平台
 
@@ -127,11 +130,13 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | `EMBEDDING_MODEL` | 它的向量模型，例如 `BAAI/bge-m3` |
 | `EMBEDDING_DIMENSIONS` | 它的实际维度（bge-m3 = 1024）。已知模型不用填，Worker 自己算 |
 
+配了 `EMBEDDING_API_URL` 就以它为准，哪怕模型名是 Workers AI 上的那个。
+
 ### Workers AI
 
 - 走 Worker 上的 **AI 绑定**，绑定声明在 `wrangler.jsonc` 里（`"ai": { "binding": "AI" }`），**每次部署都自动带上**——控制台不用手动加绑定，重新部署也不会把它冲掉；
 - **不需要额外的模型密钥，也不用给 API Token 加任何权限**；
-- 模型 ID 以 `@cf/` 开头就自动走这条路（写 `BAAI/bge-m3` 也会自动补成 `@cf/baai/bge-m3`）；
+- 模型 ID 以 `@cf/` 开头，或者填的是 Workers AI 上有的向量模型（`BAAI/bge-m3` 这类），就**只走这条路**，不再问第三方平台（写 `BAAI/bge-m3` 会自动补成 `@cf/baai/bge-m3`）；
 - **第三方平台上没有这个向量模型时，会自动改走这条路**——不用改 `EMBEDDING_MODEL`，也不用改 `EMBEDDING_DIMENSIONS`（bge-m3 在两边都是 1024 维）；
 - bge-m3 最长 512 token，超长片段自动切开分别嵌入后取平均，尾巴不丢；
 - 页面状态栏会显示「嵌入 BAAI/bge-m3（1024 维 · Workers AI）」，一眼看出走的是哪条路。
@@ -159,7 +164,7 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | `EMBEDDING_DIMENSIONS` | `1536` | 只在模型不认识时用（平台自研模型）。已知模型的维度由模型名直接算出，不用手动同步 |
 | `EMBEDDING_API_URL` | 空 | 嵌入单独走另一个平台时填它的根地址 |
 | `EMBEDDING_API_KEY` | 空 | 上面那个平台的密钥；留空则沿用 `API_KEY` |
-| `EMBEDDING_PROVIDER` | 空 | 嵌入提供方：`workers-ai` 或 `third-party`。留空按模型名判断（`@cf/` 开头 = Workers AI） |
+| `EMBEDDING_PROVIDER` | 空 | 嵌入提供方：`workers-ai` 或 `third-party`。留空按模型名判断（`@cf/` 开头、或 Workers AI 上有的向量模型 = Workers AI） |
 | `EMBEDDING_MAX_CHARS` | `400` | 单次送进嵌入模型的字符上限。bge-m3 最长 512 token，超了自动切块后取平均 |
 | `EMBEDDING_METRIC` | `cosine` | 距离度量 |
 
