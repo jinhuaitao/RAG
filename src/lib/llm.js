@@ -65,50 +65,84 @@ function providerMessage(payload, text) {
   if (typeof payload?.error === "string" && payload.error) return payload.error;
   if (payload?.error?.message) return payload.error.message;
   if (payload?.error?.code) return String(payload.error.code);
+  // 聚合站（one-api / new-api 这类）把各渠道的失败包成 errors 对象，不是 errors 数组
+  if (payload?.errors?.message) return String(payload.errors.message);
+  if (Array.isArray(payload?.errors) && payload.errors[0]?.message) return String(payload.errors[0].message);
   if (payload?.message) return String(payload.message);
   if (payload?.detail) return String(payload.detail);
   return String(text || "").slice(0, 300);
 }
 
+// 上游抱怨「角色不合法 / 最后一条必须是 user」：说明这个网关不认标准的 system+user 形状
+const SHAPE_ERROR = /role must be|last message|must be user|invalid role|unsupported role/i;
+// 上游抱怨生成参数不认（max_tokens / temperature）：换个参数形状再试
+const PARAM_ERROR = /max_tokens|max_completion_tokens|temperature/i;
+// 聚合站把各渠道的失败包在 5xx 里返回（"所有渠道均失败: 魔搭社区: HTTP 400 …"），
+// 真正的状态码藏在文本里，不能按外层状态码当成服务端故障
+const AGGREGATOR = /所有渠道均失败|所有渠道失败|all channels failed/i;
+
 // 把上游返回的失败翻译成能直接照着做的中文提示：分清「不可改的」与「可修的」
 function providerError(status, payload, text, url) {
   const reason = providerMessage(payload, text);
-  if (status === 401 || status === 403) {
-    return new HttpError(502, `第三方接口鉴权失败（HTTP ${status}）：${reason}`, {
+  const haystack = `${reason}\n${text ?? ""}`;
+  const extra = AGGREGATOR.test(haystack)
+    ? ["报错里出现「所有渠道均失败」说明你用的是聚合站：它会逐个渠道转发，每个渠道支持的模型与请求格式都不同"]
+    : [];
+
+  if (SHAPE_ERROR.test(haystack)) {
+    return new HttpError(502, `第三方接口不接受当前的对话格式：${reason}`, {
+      hint: [
+        "上游要求 role 只能是 user/assistant/system，且最后一条消息的 role 必须是 user",
+        "本项目已自动改成「只发一条 user 消息」重试，仍被拒绝，说明这个网关还有别的格式要求",
+        ...extra,
+        "换 CHAT_MODEL，或把 API_URL 换成该平台的直连兼容地址再试",
+      ],
+    });
+  }
+
+  // 聚合站返回的 5xx 里裹着上游的 4xx，按文本里挖到的状态码判断，别一律当成服务端故障
+  const embedded = haystack.match(/HTTP\s*(\d{3})/i);
+  const effective = embedded ? Number(embedded[1]) : status;
+
+  if (effective === 401 || effective === 403) {
+    return new HttpError(502, `第三方接口鉴权失败（HTTP ${effective}）：${reason}`, {
       hint: [
         "检查 API_KEY 是否正确、是否已过期、账户是否还有余额",
         "确认这个 Key 有权调用你配置的 EMBEDDING_MODEL / CHAT_MODEL",
         "部分平台要求用「sk-」开头的 Key，注意不要把平台地址或多余引号一起粘进去",
+        ...extra,
       ],
     });
   }
-  if (status === 404) {
+  if (effective === 404) {
     return new HttpError(502, `第三方接口地址或模型不存在（HTTP 404）：${reason}`, {
       hint: [
         "检查 API_URL 是否填到 /v1 这一层，例如 https://api.openai.com/v1",
         "检查 EMBEDDING_MODEL / CHAT_MODEL 的模型 ID 在该平台上是否存在",
         "有些平台给自有模型起别名，先在平台文档里确认准确的模型名",
+        ...extra,
       ],
     });
   }
-  if (status === 429) {
+  if (effective === 429) {
     return new HttpError(429, `第三方接口限流或额度不足（HTTP 429）：${reason}`, {
       hint: [
         "稍等几秒重试，平台通常按分钟恢复",
         "检查账户余额与该模型的可用额度，嵌入与生成分别计费",
+        ...extra,
       ],
     });
   }
-  if (status >= 500) {
-    return new HttpError(502, `第三方接口返回 ${status}：${reason}`, {
-      hint: ["上游服务异常，等一会儿重试", "若持续出现，核对 API_URL 是否指向了正确的平台地址"],
+  if (effective >= 500) {
+    return new HttpError(502, `第三方接口返回 ${effective}：${reason}`, {
+      hint: ["上游服务异常，等一会儿重试", "若持续出现，核对 API_URL 是否指向了正确的平台地址", ...extra],
     });
   }
-  return new HttpError(502, `第三方接口拒绝了这次请求（HTTP ${status}）：${reason}`, {
+  return new HttpError(502, `第三方接口拒绝了这次请求（HTTP ${effective}）：${reason}`, {
     hint: [
       `请求地址：${url}`,
       "常见原因：模型 ID 不存在、上下文超长、参数不被该模型支持",
-      "在平台控制台用同样的模型名与参数试跑一次，能跑通的组合这里也能跑通",
+      ...extra,
     ],
   });
 }
@@ -198,13 +232,48 @@ function stripThink(text) {
   return { text: text.slice(end + close.length).replace(/^[\s:：]+/, ""), truncated: false };
 }
 
+// 有些网关（魔搭社区、部分聚合站）只收「最后一条 role 必须是 user」的消息，
+// system 提示词必须并进 user 消息里才认
+function asSingleUser(messages) {
+  const text = messages
+    .map((message) => {
+      if (message.role === "system") return message.content;
+      if (message.role === "user") return message.content;
+      return `[${message.role}]\n${message.content}`;
+    })
+    .join("\n\n");
+  return [{ role: "user", content: text }];
+}
+
+// 通义千问 compatible-mode 一类网关按内容分片解析
+function asParts(messages) {
+  return messages.map((message) => ({
+    role: message.role,
+    content: [{ type: "text", text: message.content }],
+  }));
+}
+
 // 不同平台对生成参数的要求不一样：老的收 max_tokens，新的推理模型只收 max_completion_tokens，
-// 还有的只允许默认 temperature。逐级降级重试，直到上游接受为止。
+// 还有的只允许默认 temperature；有网关还不认 system + user 的多轮形状。
+// 按报错内容决定下一个形状，逐级退到上游能接受的那个。
 const CHAT_VARIANTS = [
-  { build: (model, messages, temperature, max) => ({ model, messages, temperature, max_tokens: max }), fix: /max_tokens|max_completion_tokens|temperature/ },
-  { build: (model, messages, temperature, max) => ({ model, messages, max_completion_tokens: max }), fix: /max_tokens|max_completion_tokens|temperature/ },
-  { build: (model, messages) => ({ model, messages }), fix: null },
+  { id: "standard", build: (model, messages, temperature, max) => ({ model, messages, temperature, max_tokens: max }) },
+  { id: "max-completion-tokens", build: (model, messages, temperature, max) => ({ model, messages, max_completion_tokens: max }) },
+  { id: "bare", build: (model, messages) => ({ model, messages }) },
+  { id: "single-user", build: (model, messages) => ({ model, messages: asSingleUser(messages) }) },
+  { id: "single-user-parts", build: (model, messages) => ({ model, messages: asParts(asSingleUser(messages)) }) },
 ];
+
+const PARAM_FALLBACKS = ["max-completion-tokens", "bare"];
+const SHAPE_FALLBACKS = ["single-user", "single-user-parts"];
+
+function nextVariant(reason, tried) {
+  const order = SHAPE_ERROR.test(reason) ? SHAPE_FALLBACKS : PARAM_ERROR.test(reason) ? PARAM_FALLBACKS : [];
+  for (const id of order) {
+    if (!tried.has(id)) return CHAT_VARIANTS.find((variant) => variant.id === id);
+  }
+  return null;
+}
 
 export async function chatCompletion(env, { messages, temperature = 0.2, maxTokens }) {
   const model = String(env.CHAT_MODEL || "").trim();
@@ -218,14 +287,16 @@ export async function chatCompletion(env, { messages, temperature = 0.2, maxToke
   }
   const max = Math.min(MAX_CHAT_TOKENS, Math.max(1, Number(maxTokens) || 1500));
   let lastError = null;
-  for (const variant of CHAT_VARIANTS) {
+  const tried = new Set();
+  let variant = CHAT_VARIANTS[0];
+  while (variant) {
+    tried.add(variant.id);
     let payload;
     try {
       payload = await callApi(env, "/chat/completions", variant.build(model, messages, temperature, max));
     } catch (error) {
       lastError = error;
-      const retryable = variant.fix && variant.fix.test(String(error.message ?? "").toLowerCase());
-      if (!retryable || variant === CHAT_VARIANTS[CHAT_VARIANTS.length - 1]) throw error;
+      variant = nextVariant(String(error?.message ?? ""), tried);
       continue;
     }
     const { content, reasoning } = readContent(payload);
