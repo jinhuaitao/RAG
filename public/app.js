@@ -118,7 +118,7 @@ function applyReadiness() {
     const button = $(id);
     if (button.classList.contains("is-busy")) continue;
     button.disabled = !ready;
-    button.title = ready ? "" : "先在页面上方配置第三方模型接口（API_URL / API_KEY）";
+    button.title = ready ? "" : "先在 Workers 控制台配好 API_URL / API_KEY，再刷新页面";
   }
 }
 
@@ -126,44 +126,45 @@ function applyReadiness() {
 function renderStatus() {
   const status = state.status;
   const chips = $("statChips");
+  const facts = $("statusFacts");
+  const line = $("statusLine");
   chips.textContent = "";
+  facts.textContent = "";
+  line.hidden = true;
+  line.textContent = "";
   if (!status) {
-    $("statusLine").textContent = "正在连接服务…";
+    line.hidden = false;
+    line.textContent = "正在连接服务…";
     return;
   }
 
-  const parts = [];
-  if (state.counts) parts.push(`${state.counts.docs} 篇文档 · ${state.counts.chunks} 个片段`);
-  if (status.config.api_host) parts.push(`接口 ${status.config.api_host}`);
+  const stateChip = (ok, text) => {
+    const node = el("span", "chip");
+    node.append(el("span", `chip-dot ${ok ? "is-ok" : "is-warn"}`), document.createTextNode(text));
+    return node;
+  };
+  const ready = status.provisioned && status.llm_ready;
+  const authChip = () => {
+    if (!status.auth_required) return stateChip(false, "未设令牌");
+    return state.token ? stateChip(true, "已鉴权") : stateChip(false, "待填令牌");
+  };
+  chips.append(stateChip(ready, ready ? "服务就绪" : "待配置"), authChip());
+
+  const row = (label, value) => {
+    const wrap = el("div", "facts-row");
+    wrap.append(el("dt", "", label), el("dd", "", value));
+    facts.appendChild(wrap);
+  };
+  if (state.counts) row("资料", `${state.counts.docs} 篇文档 · ${state.counts.chunks} 个片段`);
+  if (status.config.api_host) row("接口", status.config.api_host);
   // 嵌入单独走另一个平台时，把它的地址也摆出来，别让人以为走的是同一个
   if (status.config.embedding_api_host && status.config.embedding_api_host !== status.config.api_host) {
-    parts.push(`嵌入接口 ${status.config.embedding_api_host}`);
+    row("嵌入接口", status.config.embedding_api_host);
   }
   // 嵌入走的是 Workers AI 还是第三方平台，说清楚
   const provider = status.config.embedding_provider === "workers-ai" ? " · Workers AI" : "";
-  parts.push(`嵌入 ${status.config.embedding_model}（${status.config.embedding_dimensions} 维${provider}）`);
-  parts.push(`生成 ${status.config.chat_model}`);
-  $("statusLine").textContent = parts.join(" · ");
-
-  const dot = (cls) => el("span", `chip-dot ${cls}`);
-  const ready = status.provisioned && status.llm_ready;
-  const readyChip = el("span", "chip");
-  readyChip.append(dot(ready ? "is-ok" : "is-warn"), document.createTextNode(ready ? "服务就绪" : "待配置"));
-  chips.appendChild(readyChip);
-
-  if (state.counts) {
-    const docs = el("span", "chip");
-    docs.append(el("b", "", String(state.counts.docs)), document.createTextNode(" 篇文档"));
-    chips.appendChild(docs);
-  }
-
-  const model = el("span", "chip", status.config.chat_model);
-  model.title = `嵌入 ${status.config.embedding_model} · 生成 ${status.config.chat_model}`;
-  chips.appendChild(model);
-
-  const auth = el("span", "chip");
-  auth.append(dot(status.auth_required ? "is-ok" : "is-warn"), document.createTextNode(status.auth_required ? "已鉴权" : "未设令牌"));
-  chips.appendChild(auth);
+  row("嵌入", `${status.config.embedding_model} · ${status.config.embedding_dimensions} 维${provider}`);
+  row("生成", status.config.chat_model);
 }
 
 function renderBanners() {
@@ -244,7 +245,7 @@ function renderBanners() {
       warn: true,
       parts: [
         "除状态查询外，所有接口都要求令牌。请在 Workers 控制台添加 Secret ADMIN_TOKEN，",
-        "然后在页面右上角填入同一个值并保存。",
+        "然后点右上角的齿轮，填入同一个值并保存。",
       ],
     });
   }
@@ -432,7 +433,12 @@ async function loadStatus() {
     renderBanners();
     applyReadiness();
   } catch (error) {
-    $("statusLine").textContent = `服务状态获取失败：${error.message}`;
+    $("statChips").textContent = "";
+    $("statusFacts").textContent = "";
+    const line = $("statusLine");
+    line.hidden = false;
+    line.textContent = `服务状态获取失败：${error.message}`;
+    toast(`服务状态获取失败：${error.message}`, "error");
   }
 }
 
@@ -595,11 +601,49 @@ document.querySelectorAll(".mode").forEach((button) => {
   button.addEventListener("click", () => selectMode(button.dataset.mode));
 });
 
+/* ---------------- 设置抽屉 ---------------- */
+const settingsPanel = $("settingsPanel");
+const settingsScrim = $("settingsScrim");
+
+function setSettings(open) {
+  settingsPanel.classList.toggle("is-open", open);
+  settingsScrim.classList.toggle("is-open", open);
+  document.body.classList.toggle("settings-open", open);
+  settingsPanel.toggleAttribute("inert", !open);
+  $("settingsBtn").setAttribute("aria-expanded", String(open));
+  (open ? $("settingsClose") : $("settingsBtn")).focus();
+}
+
+$("settingsBtn").addEventListener("click", () => {
+  setSettings(!settingsPanel.classList.contains("is-open"));
+});
+$("settingsClose").addEventListener("click", () => setSettings(false));
+settingsScrim.addEventListener("click", () => setSettings(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && settingsPanel.classList.contains("is-open")) setSettings(false);
+});
+// aria-modal 的抽屉要把 Tab 圈在里面，否则键盘会跑到背后的页面上
+settingsPanel.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const focusable = settingsPanel.querySelectorAll("button, input, select, textarea, a[href]");
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
 $("saveToken").addEventListener("click", () => {
   state.token = $("token").value.trim();
   if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
   else localStorage.removeItem(TOKEN_KEY);
   toast(state.token ? "令牌已保存在本地浏览器" : "已清空令牌");
+  setSettings(false);
   loadStatus();
   loadDocs();
 });

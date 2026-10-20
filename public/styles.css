@@ -211,26 +211,159 @@ p {
   flex: none;
 }
 
-.brand-text {
-  min-width: 0;
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink-2);
+  cursor: pointer;
+  flex: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.brand-sub {
-  margin-top: 1px;
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.55;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.icon-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--line-2);
+  color: var(--ink);
 }
 
-.appbar-tools {
+/* ============ 设置抽屉 ============ */
+.settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(10, 14, 22, 0.38);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.settings-scrim.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  width: min(380px, 100vw);
+  padding: 18px 20px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+  overflow-y: auto;
+  transform: translateX(102%);
+  visibility: hidden;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s linear 0.22s;
+}
+
+.settings-panel.is-open {
+  transform: none;
+  visibility: visible;
+  transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.settings-head {
   display: flex;
   align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-head .icon-btn {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border-color: transparent;
+}
+
+.settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-block h3 {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.settings-block .chips {
+  gap: 6px;
+}
+
+.settings-status {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.settings-facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+}
+
+.settings-facts:empty {
+  display: none;
+}
+
+.facts-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.facts-row dt {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.facts-row dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.settings-block .token-field {
+  width: 100%;
+}
+
+.settings-block .token-field input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: 36px;
+}
+
+.settings-block code {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+body.settings-open {
+  overflow: hidden;
 }
 
 .chips {
@@ -254,11 +387,6 @@ p {
   white-space: nowrap;
 }
 
-.chip b {
-  font-weight: 650;
-  color: var(--ink);
-}
-
 .chip-dot {
   width: 6px;
   height: 6px;
@@ -280,12 +408,6 @@ p {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.token-field label {
-  color: var(--muted);
-  font-size: 12.5px;
-  white-space: nowrap;
 }
 
 .token-field input {
@@ -1183,11 +1305,6 @@ select {
     padding-right: 16px;
   }
 
-  .appbar-tools {
-    width: 100%;
-    justify-content: space-between;
-  }
-
   .navbar {
     top: 0;
     position: static;
@@ -1195,10 +1312,6 @@ select {
 
   .appbar {
     position: static;
-  }
-
-  .token-field input {
-    width: 130px;
   }
 }
 
@@ -1215,10 +1328,6 @@ select {
   .card {
     padding: 16px;
     border-radius: var(--r-md);
-  }
-
-  .token-field label {
-    display: none;
   }
 
   .filter-input {

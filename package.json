@@ -9,7 +9,6 @@
     "preview": "node scripts/dev-mock.mjs",
     "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
-    "setup": "bash scripts/deploy.sh",
     "schema:dump": "node scripts/dump-schema.mjs",
     "check": "bash scripts/check.sh",
     "test": "node scripts/test.mjs && node scripts/test-e2e.mjs"

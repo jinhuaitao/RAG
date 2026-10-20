@@ -100,7 +100,7 @@ export async function requireAuth(request, env) {
   const header = request.headers.get("authorization") || "";
   const provided = header.startsWith("Bearer ") ? header.slice(7) : header;
   if (!(await safeEqual(String(token), String(provided)))) {
-    throw new HttpError(401, "需要有效的访问令牌：在页面右上角填入 Token，或请求头带上 Authorization: Bearer <ADMIN_TOKEN>");
+    throw new HttpError(401, "需要有效的访问令牌：点页面右上角齿轮填入 Token，或请求头带上 Authorization: Bearer <ADMIN_TOKEN>");
   }
 }
 

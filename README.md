@@ -94,7 +94,7 @@ Cloudflare 控制台 → **Workers & Pages → Create → Workers → Get starte
 
 ### 4 · 点「初始化资源」
 
-打开 Worker 地址，右上角填 `ADMIN_TOKEN` → **保存**（只存在浏览器 localStorage），再点 **初始化资源**。
+打开 Worker 地址，点右上角齿轮，填 `ADMIN_TOKEN` → **保存**（只存在浏览器 localStorage），再点 **初始化资源**。
 
 Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（维度按嵌入模型算：已知模型自动得出，未知模型才看 `EMBEDDING_DIMENSIONS`，默认 1536 维 / cosine）。这个动作**幂等**，重复点只会跳过已存在的资源。
 
@@ -139,7 +139,7 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 - 模型 ID 以 `@cf/` 开头，或者填的是 Workers AI 上有的向量模型（`BAAI/bge-m3` 这类），就**只走这条路**，不再问第三方平台（写 `BAAI/bge-m3` 会自动补成 `@cf/baai/bge-m3`）；
 - **第三方平台上没有这个向量模型时，会自动改走这条路**——不用改 `EMBEDDING_MODEL`，也不用改 `EMBEDDING_DIMENSIONS`（bge-m3 在两边都是 1024 维）；
 - bge-m3 最长 512 token，超长片段自动切开分别嵌入后取平均，尾巴不丢；
-- 页面状态栏会显示「嵌入 BAAI/bge-m3（1024 维 · Workers AI）」，一眼看出走的是哪条路。
+- 右上角齿轮里的「服务状态」会显示「嵌入 BAAI/bge-m3 · 1024 维 · Workers AI」，一眼看出走的是哪条路。
 
 > 只有回答问题（生成）必须走第三方平台，Worker 里没有对话模型。嵌入这条走 Workers AI 就行，不用再找一个向量平台。
 
@@ -327,7 +327,7 @@ D1 的公开 REST 端点只认 `{sql, params}` 或 `{batch: [...]}`，顶层必�
 Workers 免费计划含每天 10 万次请求；Vectorize 免费计划可建索引并存放有限向量。模型费用走**第三方平台**：嵌入按 token 计（一次入库 ≈ 片段数 × 数百 token），生成按 token 计（每次提问约 6–8k 输入 + ≤1.5k 输出）。规模化前请在平台控制台核对配额与单价；部分平台赠送的新客额度够小规模试用，但**嵌入与生成分别计费**，批量入库时嵌入那项往往先见底。
 
 **忘了 `ADMIN_TOKEN`**
-它只以 Secret 形式存在 Worker 侧，无法查看。在控制台 Settings 里删掉再设一个新值，页面右上角填新值即可，知识库数据不受影响。
+它只以 Secret 形式存在 Worker 侧，无法查看。在控制台 Settings 里删掉再设一个新值，点页面右上角齿轮填新值即可，知识库数据不受影响。
 
 **GitHub 触发重新部署后，控制台里设的变量/密钥被冲掉了？**
 不会。`wrangler.jsonc` 里不声明 `vars`（默认值在 `src/lib/config.js`）并打开了 `keep_vars`，部署只上传代码；Secret 也不会被部署删除。只有两种情况会改值：在控制台主动改了，或在 GitHub 仓库里配了 `API_KEY`（工作流会用它覆盖同名 Secret；不配就完全不动）。
@@ -436,9 +436,6 @@ src/lib/schema.js        建表 SQL 的唯一来源，schema.sql 由它导出
 public/                  问答与知识库管理页面（原生 HTML/CSS/JS，无构建）
 fixtures/                示例网页，供本地端到端抓取与测试使用
 scripts/dev-mock.mjs     离线端到端模拟，含假的 Cloudflare REST API 与假的模型接口
-scripts/deploy.sh        附录「命令行部署」的路径
-scripts/provision.sh     幂等建 D1 库与 Vectorize 索引并部署（本地/CI 用）
-scripts/set-config.mjs   查询远端 D1 的真实 UUID，写回 wrangler.jsonc
 scripts/dump-schema.mjs  从 src/lib/schema.js 导出 schema.sql
 scripts/test.mjs         切片、清洗、网址抓取、检索重排与模型接口层的回归测试
 scripts/test-e2e.mjs     端到端回归：初始化 → 入库 → 检索 → 问答 → 索引重建
@@ -448,20 +445,22 @@ scripts/check.sh         语法检查
 
 ## 附录：命令行部署
 
-习惯本地 wrangler 的话，一条脚本等价于上面第 2–3 步（第 4 步仍在浏览器里点按钮，或用前面的 curl）：
+习惯本地 wrangler 的话，几条命令等价于上面第 2–3 步（第 4 步仍在浏览器里点按钮，或用前面的 curl）：
 
 ```bash
 export CLOUDFLARE_API_TOKEN=<Token>
 export CLOUDFLARE_ACCOUNT_ID=<Account ID>
-export ADMIN_TOKEN=<自定义访问令牌>
-export API_KEY=<第三方平台密钥>
 npm install
-bash scripts/deploy.sh      # 等价 npm run setup
+npx wrangler deploy
+npx wrangler secret put ADMIN_TOKEN    # 交互输入，只写这一个
+npx wrangler secret put API_KEY
 ```
 
-脚本做三件事：`wrangler deploy` → 把上述环境变量写成 Secret → 打印剩下的浏览器步骤。未提供的变量会被跳过并提示，不会把控制台里已有的值覆盖成空。
+`secret put` 交互输入要写的值，每次只覆盖同名的那一个；不写的那一个保持控制台里的原值，不会被冲成空。
 
 `API_URL` 是普通变量不是密钥，在控制台加一个同名变量即可；部署带着 `keep_vars`，不会动控制台里已有的变量与 Secret。
+
+资源不用建：Worker 第一次执行「初始化资源」时自己通过 Cloudflare REST API 创建 D1 与 Vectorize，`wrangler.jsonc` 里不写死绑定。
 
 ## 附录：GitHub Actions 自动部署
 
