@@ -1,7 +1,7 @@
 import { HttpError } from "./http.js";
 import { vectorize } from "./cfapi.js";
 import { chunkId } from "./store.js";
-import { embeddings } from "./llm.js";
+import { embeddings, expectedDimensions } from "./llm.js";
 
 const EMBED_BATCH = 16;
 // Vectorize 单次写入上限 1000 条，但请求体本身也要留余量：1024 维一条约 11KB，50 条 ≈ 550KB
@@ -19,17 +19,17 @@ export async function embed(env, texts) {
 }
 
 function assertDimensions(env, vector) {
-  const expected = Number(env.EMBEDDING_DIMENSIONS);
+  const expected = expectedDimensions(env);
   if (!Array.isArray(vector)) throw new HttpError(502, `嵌入模型 ${env.EMBEDDING_MODEL} 没有返回向量数组`);
   if (expected && vector.length !== expected) {
     throw new HttpError(
       500,
-      `向量维度不匹配：模型 ${env.EMBEDDING_MODEL} 输出 ${vector.length} 维，但配置与向量索引是 ${expected} 维`,
+      `向量维度不匹配：模型 ${env.EMBEDDING_MODEL} 输出 ${vector.length} 维，但向量索引按 ${expected} 维建`,
       {
         hint: [
-          `1) 把控制台变量 EMBEDDING_DIMENSIONS 改成 ${vector.length}`,
-          `2) 或者换一个输出 ${expected} 维的嵌入模型`,
-          "3) 改完重新部署，在页面点「初始化资源」——索引维度不符时它会按新维度重建并自动重新嵌入",
+          `1) 换一个输出 ${expected} 维的嵌入模型`,
+          "2) 已知模型的维度是按模型名自动算的；只有平台自研模型才要手动填 EMBEDDING_DIMENSIONS",
+          "3) 改完点「初始化资源」—— 索引维度不符时它会按新维度重建并自动重新嵌入",
         ],
       }
     );
@@ -66,7 +66,7 @@ export async function indexDocument(env, docId, chunks) {
 
 // 重建索引后把 D1 里的正文重新嵌入：向量无法迁移，但原文都还在库里，文档不用重新上传
 export async function reembedChunks(env, rows) {
-  if (!rows.length) return { count: 0, model: env.EMBEDDING_MODEL, dimensions: Number(env.EMBEDDING_DIMENSIONS), mutations: [] };
+  if (!rows.length) return { count: 0, model: env.EMBEDDING_MODEL, dimensions: expectedDimensions(env), mutations: [] };
   const vectors = await embed(env, rows.map((row) => row.content));
   const items = rows.map((row, index) => ({
     id: row.id,

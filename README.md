@@ -95,7 +95,7 @@ Cloudflare 控制台 → **Workers & Pages → Create → Workers → Get starte
 
 打开 Worker 地址，右上角填 `ADMIN_TOKEN` → **保存**（只存在浏览器 localStorage），再点 **初始化资源**。
 
-Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（按 `EMBEDDING_DIMENSIONS` 建，默认 1536 维 / cosine）。这个动作**幂等**，重复点只会跳过已存在的资源。
+Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（维度按嵌入模型算：已知模型自动得出，未知模型才看 `EMBEDDING_DIMENSIONS`，默认 1536 维 / cosine）。这个动作**幂等**，重复点只会跳过已存在的资源。
 
 账号里已有维度不对的同名索引时，页面会显示「还差一步：重建向量索引」，点它即可——Worker 删掉旧索引按新维度重建，并把库里保存的正文重新嵌入，**文档不用重传**。
 
@@ -113,8 +113,10 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | 场景 | 怎么配 |
 | --- | --- |
 | 平台既有对话模型也有向量模型 | 不用配，嵌入与生成都走 `API_URL` / `API_KEY` |
-| 平台只有对话模型（DeepSeek 这类本身没有嵌入 API） | 加 `EMBEDDING_API_URL` + `EMBEDDING_API_KEY`（另一个能嵌入的平台），并把 `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` 换成它的向量模型与维度 |
-| 不想再找一个嵌入平台 | `EMBEDDING_MODEL` = `@cf/baai/bge-m3`、`EMBEDDING_DIMENSIONS` = `1024`，嵌入改走 Cloudflare 自带的 **Workers AI** |
+| 平台只有对话模型（DeepSeek 这类本身没有嵌入 API） | 不用配：Worker 会发现这个平台上没有向量模型，自动改走 Cloudflare 自带的 **Workers AI**（同一个模型，维度也一样） |
+| 想让嵌入固定走另一个平台 | 加 `EMBEDDING_API_URL` + `EMBEDDING_API_KEY`（另一个能嵌入的平台），`EMBEDDING_MODEL` 填它的向量模型 |
+
+> 自动改走只对 Workers AI 上有的向量模型生效（bge 系列、`multilingual-e5-large`）。平台上没有、Workers AI 上也没有时，才需要另配一个嵌入平台。
 
 ### 单独一个嵌入平台
 
@@ -123,15 +125,16 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | `EMBEDDING_API_URL` | 嵌入平台根地址，例如 `https://api.siliconflow.cn/v1` |
 | `EMBEDDING_API_KEY` | 那个平台的密钥（**Secret**） |
 | `EMBEDDING_MODEL` | 它的向量模型，例如 `BAAI/bge-m3` |
-| `EMBEDDING_DIMENSIONS` | 它的实际维度（bge-m3 = 1024） |
+| `EMBEDDING_DIMENSIONS` | 它的实际维度（bge-m3 = 1024）。已知模型不用填，Worker 自己算 |
 
 ### Workers AI
 
 - 走 Worker 上的 **AI 绑定**，绑定声明在 `wrangler.jsonc` 里（`"ai": { "binding": "AI" }`），**每次部署都自动带上**——控制台不用手动加绑定，重新部署也不会把它冲掉；
 - **不需要额外的模型密钥，也不用给 API Token 加任何权限**；
 - 模型 ID 以 `@cf/` 开头就自动走这条路（写 `BAAI/bge-m3` 也会自动补成 `@cf/baai/bge-m3`）；
+- **第三方平台上没有这个向量模型时，会自动改走这条路**——不用改 `EMBEDDING_MODEL`，也不用改 `EMBEDDING_DIMENSIONS`（bge-m3 在两边都是 1024 维）；
 - bge-m3 最长 512 token，超长片段自动切开分别嵌入后取平均，尾巴不丢；
-- 页面状态栏会显示「嵌入 @cf/baai/bge-m3（1024 维 · Workers AI）」，一眼看出走的是哪条路。
+- 页面状态栏会显示「嵌入 BAAI/bge-m3（1024 维 · Workers AI）」，一眼看出走的是哪条路。
 
 > 只有回答问题（生成）必须走第三方平台，Worker 里没有对话模型。嵌入这条走 Workers AI 就行，不用再找一个向量平台。
 
@@ -153,7 +156,7 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 | `CHAT_MODEL` | `gpt-4o-mini` | 生成模型 ID（`deepseek-chat`、`qwen-plus`、`moonshot-v1-8k` 等） |
 | `CHAT_MAX_TOKENS` | `1500` | 生成上限（1–4096）。推理模型的思考也吃这份额度，太小会被截成「只有思考没有正文」 |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | 嵌入模型 ID，填平台上的实际名称（`BAAI/bge-m3`、`@cf/baai/bge-m3` 等） |
-| `EMBEDDING_DIMENSIONS` | `1536` | **必须与模型实际输出维度一致**，初始化时用它建索引 |
+| `EMBEDDING_DIMENSIONS` | `1536` | 只在模型不认识时用（平台自研模型）。已知模型的维度由模型名直接算出，不用手动同步 |
 | `EMBEDDING_API_URL` | 空 | 嵌入单独走另一个平台时填它的根地址 |
 | `EMBEDDING_API_KEY` | 空 | 上面那个平台的密钥；留空则沿用 `API_KEY` |
 | `EMBEDDING_PROVIDER` | 空 | 嵌入提供方：`workers-ai` 或 `third-party`。留空按模型名判断（`@cf/` 开头 = Workers AI） |
@@ -185,14 +188,14 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 
 **只换生成模型**（`CHAT_MODEL`）不影响已有向量，改完部署即可。
 
-**换嵌入模型**会改变向量维度，旧向量无法迁移。但正文都存在 D1 里，**不需要删掉文档重新上传**：在控制台改掉 `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` 并重新部署，再点**初始化资源**——
+**换嵌入模型**会改变向量维度，旧向量无法迁移。但正文都存在 D1 里，**不需要删掉文档重新上传**：在控制台改掉 `EMBEDDING_MODEL` 并重新部署，再点**初始化资源**——
 
-- 索引维度与配置一致 → 跳过，什么都不做；
-- 维度对不上 → 页面出现「还差一步：重建向量索引」，Worker 会先探一次新模型的维度（确认真能出配置里的维度，不符就在删索引之前拦住），然后删掉旧索引、按新维度重建，并拿库里的正文重新嵌入。片段多到一次做不完会自动分批接着做，页面上能看到进度。
+- 索引维度与新模型一致 → 跳过，什么都不做；
+- 维度对不上 → 页面出现「还差一步：重建向量索引」，Worker 会先探一次新模型的维度（确认真能出这个维度，不符就在删索引之前拦住），然后删掉旧索引、按新维度重建，并拿库里的正文重新嵌入。片段多到一次做不完会自动分批接着做，页面上能看到进度。
 
 换第三方平台时通常还要一起改 `API_URL`、`API_KEY`，有时还有 `API_KEY_HEADER` / `API_KEY_PREFIX`。
 
-常用嵌入模型的维度：`text-embedding-3-small` = 1536、`text-embedding-3-large` = 3072、`BAAI/bge-m3` = 1024、`BAAI/bge-large-zh-v1.5` = 1024、`Qwen3-Embedding-8B` = 4096。**维度填错会在入库时报「向量维度不匹配」**，改对后重建索引即可。
+常用嵌入模型的维度：`text-embedding-3-small` = 1536、`text-embedding-3-large` = 3072、`BAAI/bge-m3` = 1024、`BAAI/bge-large-zh-v1.5` = 1024、`Qwen3-Embedding-8B` = 4096。**这些维度和模型名是一一对应的，Worker 自己认，换模型不用手动改 `EMBEDDING_DIMENSIONS`**；只有平台自研模型才要手填。**维度填错会在入库时报「向量维度不匹配」**，改对后重建索引即可。
 
 ## 工作原理
 
@@ -258,19 +261,19 @@ Worker 会建好 D1 库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectori
 `API_URL` 或 `API_KEY` 没配好。加 `API_URL`（Text）和 `API_KEY`（**Secret**），保存后 Retry deployment，再点页面上的「重新检查」。
 
 **入库报「向量维度不匹配」**
-`EMBEDDING_MODEL` 的输出维度 ≠ `EMBEDDING_DIMENSIONS`。查该模型的实际维度并改正，然后按[换模型 / 换维度](#换模型--换维度)重建。
+模型实际输出的维度与索引维度对不上。已知模型的维度 Worker 自己算（`bge-m3` = 1024、`text-embedding-3-small` = 1536），对不上说明索引还是旧的：点**初始化资源**按新模型重建。若是平台自研模型，把 `EMBEDDING_DIMENSIONS` 填成它的实际维度，再重建。
 
 **入库报「第三方平台没有这个嵌入模型」/ `Embedding model not found`**
 入库要的是**向量**，模型 ID 填成了聊天模型（DeepSeek / GPT / Claude 这类只能回答问题），或这个平台上根本没有这个嵌入模型。报错里会列出平台上可用的嵌入模型（Worker 自己去 `/models` 拉的清单），照着换即可；`EMBEDDING_MODEL` 和 `CHAT_MODEL` 必须是两个不同的模型。
 
 **报错说「这个平台的清单里一个向量模型都没有」**
-这个平台只提供对话模型，入库没法在它上面做。生成继续用它，嵌入有两条路：配 `EMBEDDING_API_URL` + `EMBEDDING_API_KEY` 另找一个嵌入平台，或把 `EMBEDDING_MODEL` 改成 `@cf/baai/bge-m3` 改走 Workers AI。见[嵌入走哪儿](#嵌入走哪儿)。
+这个平台只提供对话模型。若 `EMBEDDING_MODEL` 填的是 Workers AI 上也有的向量模型（bge 系列等），Worker 会自动改走 Workers AI，这条提示可以直接忽略；想固定走别的平台，就配 `EMBEDDING_API_URL` + `EMBEDDING_API_KEY`。见[嵌入走哪儿](#嵌入走哪儿)。
 
 **报错说「没有可用渠道支持模型 X」**
-模型 ID 不在平台登记的名单里，通常是少了渠道后缀（`DeepSeek-V4-Flash(AMD)`）。报错里会列出平台 `/models` 的完整清单，照抄一个即可。若报的是嵌入模型（HTTP 503），说明这个平台没有该**向量**模型——`/embeddings` 地址本身没错，错的是模型。
+模型 ID 不在平台登记的名单里，通常是少了渠道后缀（`DeepSeek-V4-Flash(AMD)`）。报错里会列出平台 `/models` 的完整清单，照抄一个即可。若报的是嵌入模型（HTTP 503），说明这个平台没有该**向量**模型——`/embeddings` 地址本身没错，错的是模型；Workers AI 上有同一个模型时会自动改走。
 
 **报错说「Workers AI 上没有 X 这个模型」**
-模型名不在 Workers AI 上（向量模型一般只认 `@cf/` 开头的名字）。报错里会列出常用的几个，改 `EMBEDDING_MODEL` 并把 `EMBEDDING_DIMENSIONS` 改成对应维度即可。
+模型名不在 Workers AI 上（向量模型一般只认 `@cf/` 开头的名字）。报错里会列出常用的几个，改 `EMBEDDING_MODEL` 指过去即可，维度不用动。
 
 **报错说「这个 Worker 没有绑定 Workers AI（AI）」**
 仓库根目录的 `wrangler.jsonc` 里少了 `"ai": { "binding": "AI" }`，或者这次部署用的不是仓库里的配置。补上后点 **Deployments → 最新一次 → Retry deployment**。
@@ -415,6 +418,7 @@ src/lib/cfapi.js         Cloudflare REST API 封装：D1 建库/查询、Vectori
 src/lib/setup.js         「初始化资源」的幂等逻辑与 provisioning 状态探测
 src/lib/store.js         通过 REST 读写 D1（切片原文按向量 id 回查）
 src/lib/llm.js           第三方 OpenAI 兼容接口：地址归一化、嵌入/生成调用、错误翻成中文提示
+src/lib/models.js        已知向量模型的维度表与 Workers AI 模型清单（维度按模型名算）
 src/lib/workersai.js     Workers AI 向量模型：走 Worker 上的 AI 绑定，长文本切块后取平均
 src/lib/rag.js           嵌入、批量 upsert、向量检索、维度校验
 src/lib/rank.js          检索词抽取、关键词召回 SQL、两路分数合并重排、重叠去重

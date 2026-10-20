@@ -1,6 +1,7 @@
 // Workers AI 嵌入：走 Worker 上的 AI 绑定（wrangler.jsonc 里声明，随每次部署自动生效）。
 // 不需要额外的模型密钥，也不需要给 API Token 加 Workers AI 权限。
 import { HttpError } from "./http.js";
+import { modelDimensions } from "./models.js";
 
 // Workers AI 的模型 ID 一律带 @cf/ 前缀，用户习惯填的 BAAI/bge-m3 要补上
 const ALIASES = new Map([
@@ -12,6 +13,7 @@ const ALIASES = new Map([
   ["baai/bge-large-en-v1.5", "@cf/baai/bge-large-en-v1.5"],
   ["baai/bge-small-en-v1.5", "@cf/baai/bge-small-en-v1.5"],
   ["baai/bge-base-en-v1.5", "@cf/baai/bge-base-en-v1.5"],
+  ["multilingual-e5-large", "@cf/multilingual-e5-large"],
 ]);
 
 // Workers AI 上常见的向量模型与维度，出现在报错里
@@ -27,6 +29,11 @@ export function normalizeModel(model) {
   if (!raw) return "";
   if (raw.startsWith("@")) return raw;
   return ALIASES.get(raw.toLowerCase()) ?? `@cf/${raw}`;
+}
+
+// Workers AI 上这个模型输出多少维
+export function workersAiDimensions(model) {
+  return modelDimensions(model);
 }
 
 // bge-m3 最长 512 token，超了会被截断或直接报错。
@@ -55,7 +62,7 @@ function aiError(error, model) {
   if (/not found|unknown model|no such model|7003/i.test(detail)) {
     hint.push(`Workers AI 上没有 ${model} 这个模型`);
     hint.push(`可用的向量模型：${KNOWN_MODELS.join("、")}`);
-    hint.push(`改控制台变量 EMBEDDING_MODEL，并把 EMBEDDING_DIMENSIONS 改成对应维度`);
+    hint.push("改控制台变量 EMBEDDING_MODEL 指向上面的模型（维度按模型自动算，不用手动改 EMBEDDING_DIMENSIONS）");
   } else if (/too long|maximum context|token limit|exceed/i.test(detail)) {
     hint.push("文本太长，被模型的 token 上限挡住了");
     hint.push("把控制台变量 CHUNK_MAX_CHARS 或 EMBEDDING_MAX_CHARS 调小（例如 600 → 400）");
@@ -116,7 +123,7 @@ export async function workersAiEmbeddings(env, texts) {
     throw new HttpError(503, "还没有配置嵌入模型（EMBEDDING_MODEL）", {
       hint: [
         "在控制台变量 EMBEDDING_MODEL 填 Workers AI 的向量模型，例如 @cf/baai/bge-m3",
-        "它的输出是 1024 维，EMBEDDING_DIMENSIONS 也要填 1024",
+        "它的输出是 1024 维，索引维度按模型自动建，不用手动填 EMBEDDING_DIMENSIONS",
       ],
     });
   }

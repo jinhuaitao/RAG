@@ -3,6 +3,7 @@ import { HttpError } from "./http.js";
 import { SCHEMA_STATEMENTS } from "./schema.js";
 import { countChunks, databaseUuid, listChunkPage, resetDatabaseCache } from "./store.js";
 import { probeDimensions, reembedChunks } from "./rag.js";
+import { expectedDimensions } from "./llm.js";
 
 // 一次重建处理多少片段：150 个 = 10 次嵌入请求 + 3 次写入 + 1 次查库，
 // 免费版每次调用 50 个子请求的额度够用，超出的部分由前端分批接着做
@@ -11,7 +12,7 @@ const REBUILD_PAGE = 150;
 function indexSpec(env) {
   return {
     name: env.INDEX_NAME,
-    dimensions: Number(env.EMBEDDING_DIMENSIONS),
+    dimensions: expectedDimensions(env),
     metric: env.EMBEDDING_METRIC || "cosine",
     description: "RAG 知识库切片向量",
   };
@@ -57,7 +58,7 @@ export async function initialize(env) {
   await d1.batch(env, uuid, SCHEMA_STATEMENTS.map((sql) => ({ sql, params: [] })));
   steps.push({ step: "tables", action: "ensure", detail: "documents / chunks" });
 
-  const expected = Number(env.EMBEDDING_DIMENSIONS);
+  const expected = expectedDimensions(env);
   const existing = await vectorize.getIndex(env, env.INDEX_NAME);
   let reembed = null;
   if (!existing) {
@@ -87,10 +88,10 @@ export async function continueReembed(env, offset) {
       hint: "索引被删掉了，点「初始化资源」会重新建好并重新嵌入库里的正文",
     });
   }
-  const expected = Number(env.EMBEDDING_DIMENSIONS);
+  const expected = expectedDimensions(env);
   const dimensions = Number(existing?.config?.dimensions ?? existing?.dimensions ?? 0);
   if (dimensions && dimensions !== expected) {
-    throw new HttpError(409, `索引 ${env.INDEX_NAME} 是 ${dimensions} 维，与配置的 ${expected} 维不符`, {
+    throw new HttpError(409, `索引 ${env.INDEX_NAME} 是 ${dimensions} 维，与模型 ${env.EMBEDDING_MODEL} 的 ${expected} 维不符`, {
       hint: "点「初始化资源」按新维度重建索引，并自动重新嵌入库里的正文",
     });
   }
@@ -123,7 +124,7 @@ export async function provisionStatus(env) {
     const index = await vectorize.getIndex(env, env.INDEX_NAME);
     if (index) {
       const dimensions = Number(index?.config?.dimensions ?? index?.dimensions ?? 0);
-      const expected = Number(env.EMBEDDING_DIMENSIONS);
+      const expected = expectedDimensions(env);
       status.index = {
         name: env.INDEX_NAME,
         dimensions,

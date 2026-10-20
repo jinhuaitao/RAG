@@ -1,5 +1,6 @@
 import { HttpError } from "./http.js";
 import { workersAiEmbeddings } from "./workersai.js";
+import { isWorkersAiEmbeddingModel, modelDimensions } from "./models.js";
 
 // 第三方 OpenAI 兼容接口：生成走这里，嵌入默认也走这里。
 // 约定：API_URL 填到 /v1 这一层（如 https://api.openai.com/v1），API_KEY 作为 Secret 配置。
@@ -43,6 +44,43 @@ export function apiHost(env) {
   }
 }
 
+// 嵌入实际应该产出多少维：已知模型由模型名直接推出来（bge-m3 在哪儿都是 1024 维），
+// 未知模型才用配置里的 EMBEDDING_DIMENSIONS。索引也按这个维度建，所以换模型不用手动同步变量。
+export function expectedDimensions(env) {
+  return modelDimensions(env.EMBEDDING_MODEL) || Number(env.EMBEDDING_DIMENSIONS) || 0;
+}
+
+// 第三方平台没有这个向量模型时，自动改走 Cloudflare 自带的 Workers AI。
+// 结论按 (平台, 模型) 记下来，同一批请求里不用每批都去撞一次墙。
+const embeddingFallback = new WeakMap();
+
+function fallbackKey(env) {
+  return `${String(env.API_URL || "").trim()}|${String(env.EMBEDDING_MODEL || "").trim()}`;
+}
+
+function platformLacksVectorModel(env) {
+  return Boolean(embeddingFallback.get(env)?.has(fallbackKey(env)));
+}
+
+function rememberPlatformLacksVectorModel(env) {
+  const state = embeddingFallback.get(env) ?? new Set();
+  state.add(fallbackKey(env));
+  embeddingFallback.set(env, state);
+}
+
+// 能不能自动改走 Workers AI：这个模型 Workers AI 上有，Worker 上也绑好了 AI
+function canFallbackToWorkersAi(env, model) {
+  if (!isWorkersAiEmbeddingModel(model)) return false;
+  const binding = env.AI;
+  return Boolean(binding && typeof binding.run === "function");
+}
+
+// 现在实际在用哪个提供方：自动改走过就报 workers-ai，页面上的提示才准
+export function activeEmbeddingProvider(env) {
+  if (platformLacksVectorModel(env)) return "workers-ai";
+  return embeddingProvider(env);
+}
+
 // 嵌入走哪个提供方：EMBEDDING_PROVIDER 说了算；没写就看模型 ID——@cf/ 开头的是 Workers AI 的模型
 export function embeddingProvider(env) {
   const explicit = String(env.EMBEDDING_PROVIDER || "").trim().toLowerCase();
@@ -54,7 +92,7 @@ export function embeddingProvider(env) {
 // 有些聚合站只提供对话模型，没有向量模型；这时可以单独指定做嵌入的平台
 export function embeddingApiHost(env) {
   // Workers AI 走的是 Worker 上的 AI 绑定，没有对外的接口地址
-  if (embeddingProvider(env) === "workers-ai") return "";
+  if (activeEmbeddingProvider(env) === "workers-ai") return "";
   const url = String(env.EMBEDDING_API_URL || "").trim();
   if (!url) return apiHost(env);
   try {
@@ -206,10 +244,12 @@ async function modelMissingError(env, kind, model, reason, mode = "missing") {
   const candidates = pickModels(ids, kind);
 
   const hint = [`当前 ${variable} = ${model}`];
+  // Workers AI 上有没有这个模型：决定能不能自动改走，用户一个变量都不用改
+  const knownOnWorkersAi = isEmbedding && isWorkersAiEmbeddingModel(model);
   if (mode === "noChannel") {
     if (isEmbedding) {
       hint.push("这个平台上没有这个嵌入模型：聚合站的对话渠道挂了它，但没人提供向量接口");
-      hint.push("或者把 EMBEDDING_MODEL 改成 @cf/baai/bge-m3：嵌入改走 Cloudflare 自带的 Workers AI（1024 维），不需要额外的密钥");
+      hint.push("嵌入模型要能输出向量，聊天模型不能用来做嵌入（DeepSeek / GPT / Claude 这类只能回答问题）");
     } else {
       hint.push("模型 ID 要用平台上登记的完整名称，聚合站常给同一个模型挂不同渠道后缀（例如 DeepSeek-V4-Flash(AMD)）");
     }
@@ -227,7 +267,9 @@ async function modelMissingError(env, kind, model, reason, mode = "missing") {
     // 平台上根本没有向量模型：别把对话模型列成「可用的嵌入模型」
     hint.push(`这个平台的清单里一个向量模型都没有（只有 ${ids.slice(0, 6).join("、")} 这类对话模型）—— 入库没法在它上面做`);
     hint.push("另配一个能嵌入的平台：控制台加 EMBEDDING_API_URL（向量接口根地址）与 EMBEDDING_API_KEY（那个平台的密钥），嵌入走它、生成仍走现在的平台");
-    hint.push("或者把 EMBEDDING_MODEL 改成 @cf/baai/bge-m3：嵌入改走 Cloudflare 自带的 Workers AI（1024 维），不需要额外的密钥");
+    if (!knownOnWorkersAi) {
+      hint.push("或者把 EMBEDDING_MODEL 改成 @cf/baai/bge-m3：嵌入改走 Cloudflare 自带的 Workers AI（1024 维），不需要额外的密钥");
+    }
   } else if (candidates.length) {
     hint.push(`这个平台上可用的${label}：${candidates.slice(0, 8).join("、")}`);
   } else if (ids.length) {
@@ -237,8 +279,11 @@ async function modelMissingError(env, kind, model, reason, mode = "missing") {
   }
   if (isEmbedding) {
     hint.push("入库走的 /embeddings 地址没错，问题在模型 ID：嵌入必须用向量模型");
-    hint.push("换模型要同步改 EMBEDDING_DIMENSIONS（bge-m3=1024、text-embedding-3-small=1536、Qwen3-Embedding-8B=4096）");
-    hint.push("改完重新部署，点「初始化资源」按新维度重建索引");
+    hint.push("向量维度按模型自动算：bge-m3=1024、text-embedding-3-small=1536、Qwen3-Embedding-8B=4096，换模型不用手动改 EMBEDDING_DIMENSIONS");
+    if (knownOnWorkersAi) {
+      hint.push("这个模型 Workers AI 上也有（同一个模型，维度一样）：重新部署一次就会自动改走 Workers AI（AI 绑定写在 wrangler.jsonc 里，部署时自动带上），不用改 EMBEDDING_MODEL，也不用改 EMBEDDING_DIMENSIONS");
+    }
+    hint.push("改完点「初始化资源」，向量索引会按新维度重建");
   } else if (candidates.length) {
     hint.push(`改完把控制台变量 ${variable} 改成上面的名字，再重新部署即可`);
   }
@@ -533,12 +578,14 @@ export async function embeddings(env, texts) {
       hint: [
         "在控制台 Settings → Variables and Secrets 里加一个变量 EMBEDDING_MODEL，填第三方平台上的嵌入模型 ID，例如 text-embedding-3-small、BAAI/bge-m3",
         "用 Workers AI 的话填 @cf/baai/bge-m3（1024 维），不需要额外的模型密钥",
-        "换模型会改变向量维度，必须同时改 EMBEDDING_DIMENSIONS 并重建向量索引",
+        "向量维度按模型名自动算出来，换模型不用再手动同步 EMBEDDING_DIMENSIONS",
       ],
     });
   }
   // Workers AI 是 Cloudflare 自家的向量模型，走 Worker 上的 AI 绑定，不需要额外的模型密钥
   if (embeddingProvider(env) === "workers-ai") return workersAiEmbeddings(env, texts);
+  // 这个平台已经确认没有这个向量模型，后面直接走 Workers AI，不再每批都去撞一次墙
+  if (platformLacksVectorModel(env)) return workersAiEmbeddings(env, texts);
   const target = embeddingTarget(env);
   if (!target.key) {
     throw new HttpError(503, "还没有配置嵌入用的密钥（EMBEDDING_API_KEY 或 API_KEY）", {
@@ -554,8 +601,16 @@ export async function embeddings(env, texts) {
     payload = await callApi(env, "/embeddings", { model, input: texts }, target);
   } catch (error) {
     const reason = String(error?.providerReason ?? error?.message ?? error);
-    if (error?.noChannel) throw await modelMissingError(env, "embedding", model, reason, "noChannel");
-    if (MODEL_MISSING.test(reason)) throw await modelMissingError(env, "embedding", model, reason);
+    const noSuchModel = Boolean(error?.noChannel) || MODEL_MISSING.test(reason);
+    if (noSuchModel) {
+      // 第三方平台上没有这个向量模型，但 Workers AI 上有同一个：自动改走 AI 绑定，
+      // 用户一个变量都不用改，维度也跟着模型走
+      if (canFallbackToWorkersAi(env, model)) {
+        rememberPlatformLacksVectorModel(env);
+        return workersAiEmbeddings(env, texts);
+      }
+      throw await modelMissingError(env, "embedding", model, reason, error?.noChannel ? "noChannel" : "missing");
+    }
     throw error;
   }
   const data = payload?.data;

@@ -209,7 +209,7 @@ function renderBanners() {
         "回答问题走你自己的第三方模型接口，请在 Workers 控制台 Settings → Variables and Secrets 里添加：",
         "变量 API_URL —— 第三方平台的接口根地址，例如 https://api.openai.com/v1",
         "Secret API_KEY —— 第三方平台的密钥",
-        "入库用的嵌入可以用同一个平台；想改用 Cloudflare 自带的 Workers AI，就把 EMBEDDING_MODEL 填 @cf/baai/bge-m3、EMBEDDING_DIMENSIONS 填 1024，不用密钥。",
+        "入库用的嵌入默认走同一个平台；那个平台上没有向量模型时，会自动改走 Cloudflare 自带的 Workers AI，不用另配密钥，也不用改 EMBEDDING_MODEL。",
         "改完点 Retry deployment 重新部署，再回来点「重新检查」。",
       ],
       action: { label: "重新检查", primary: false, onClick: () => loadStatus() },
@@ -226,8 +226,8 @@ function renderBanners() {
     banner(mismatch ? "还差一步：重建向量索引" : "还差一步：初始化资源", "", {
       parts: mismatch
         ? [
-            `索引 ${status.config.index_name} 是 ${status.provision.index.dimensions} 维，与配置的 ${status.config.embedding_dimensions} 维不符，向量检索会用不了。`,
-            "重建会删掉旧索引，按当前配置新建，并拿库里保存的正文重新嵌入——文档不用重新上传。",
+            `索引 ${status.config.index_name} 是 ${status.provision.index.dimensions} 维，与模型 ${status.config.embedding_model} 的 ${status.config.embedding_dimensions} 维不符，向量检索会用不了。`,
+            "重建会删掉旧索引，按当前模型新建，并拿库里保存的正文重新嵌入——文档不用重新上传。",
           ]
         : [
             `缺少：${missing.join("、")}。`,
