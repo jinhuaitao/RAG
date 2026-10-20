@@ -83,7 +83,7 @@ export async function readIngest(request, env) {
 export function validateTextField(text, maxChars) {
   if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "正文内容为空");
   if (text.length > maxChars) {
-    throw new HttpError(413, `文档过长：${text.length} 字符，当前上限 ${maxChars} 字符。可在 wrangler.jsonc 的 vars.MAX_DOC_CHARS 调大，或拆成多篇上传`);
+    throw new HttpError(413, `文档过长：${text.length} 字符，当前上限 ${maxChars} 字符。可在控制台把变量 MAX_DOC_CHARS 调大，或拆成多篇上传`);
   }
 }
 

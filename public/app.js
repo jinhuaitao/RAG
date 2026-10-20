@@ -215,14 +215,20 @@ function renderBanners() {
     if (!status.provision.database) missing.push(`D1 数据库 ${status.config.database_name}`);
     if (!status.provision.tables) missing.push("documents / chunks 两张表");
     if (!status.provision.index) missing.push(`Vectorize 索引 ${status.config.index_name}`);
-    banner("还差一步：初始化资源", "", {
-      parts: [
-        `缺少：${missing.join("、")}。`,
-        status.provision.credentials
-          ? "点右侧按钮，Worker 会自己建库、建表、建向量索引，几秒钟完成，重复点不会重复创建。"
-          : "先在 Workers 控制台添加 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID 两个 Secret，再回来点按钮。",
-      ],
-      action: { label: "初始化资源", onClick: runSetup },
+    const mismatch = status.provision.index?.mismatch;
+    banner(mismatch ? "还差一步：重建向量索引" : "还差一步：初始化资源", "", {
+      parts: mismatch
+        ? [
+            `索引 ${status.config.index_name} 是 ${status.provision.index.dimensions} 维，与配置的 ${status.config.embedding_dimensions} 维不符，向量检索会用不了。`,
+            "重建会删掉旧索引，按当前配置新建，并拿库里保存的正文重新嵌入——文档不用重新上传。",
+          ]
+        : [
+            `缺少：${missing.join("、")}。`,
+            status.provision.credentials
+              ? "点右侧按钮，Worker 会自己建库、建表、建向量索引，几秒钟完成，重复点不会重复创建。"
+              : "先在 Workers 控制台添加 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID 两个 Secret，再回来点按钮。",
+          ],
+      action: { label: mismatch ? "重建索引" : "初始化资源", onClick: runSetup },
     });
   }
 
@@ -438,6 +444,26 @@ async function loadDocs() {
   }
 }
 
+// 重建索引后正文要重新嵌入，一次 Worker 调用做不完，分批接着做
+async function reembedRest(state) {
+  let offset = Number(state.offset) || 0;
+  let total = Number(state.total) || 0;
+  let remaining = Number(state.remaining) || 0;
+  while (remaining > 0) {
+    const data = await api("/api/admin/reembed", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ offset }),
+    });
+    const next = Number(data.offset) || 0;
+    if (next <= offset) throw new Error("重新嵌入没有推进，请点「重建索引」重来一次");
+    offset = next;
+    total = Number(data.total) || total;
+    remaining = Number(data.remaining) || 0;
+  }
+  return total;
+}
+
 async function runSetup() {
   const button = $("banners").querySelector(".banner-actions .btn");
   if (button) setBusy(button, true, "初始化中…");
@@ -445,6 +471,10 @@ async function runSetup() {
     const data = await api("/api/admin/setup", { method: "POST" });
     const detail = (data.steps || []).map((step) => `${step.step} ${step.action}`).join(" · ");
     toast(`资源已就绪${detail ? `（${detail}）` : ""}`, "success");
+    if (data.reembed?.remaining) {
+      const total = await reembedRest(data.reembed);
+      toast(`已按新维度重新嵌入 ${total} 个片段`, "success");
+    }
     await Promise.all([loadStatus(), loadDocs()]);
   } catch (error) {
     toast(error.message, "error");

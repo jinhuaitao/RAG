@@ -146,6 +146,19 @@ export async function listChunkIds(env, docId) {
   return rows.map((row) => row.id);
 }
 
+// 重建索引时按页取正文重新嵌入：一次不能拿太多，否则子请求额度不够
+export async function listChunkPage(env, offset, limit) {
+  return run(env, "SELECT id, doc_id, ordinal, content FROM chunks ORDER BY doc_id, ordinal LIMIT ? OFFSET ?", [
+    Number(limit),
+    Number(offset),
+  ]);
+}
+
+export async function countChunks(env) {
+  const rows = await run(env, "SELECT count(*) AS n FROM chunks");
+  return Number(rows[0]?.n ?? 0);
+}
+
 // 关键词召回：向量检索容易漏掉专有名词、数字与日期，这里用 LIKE 在整个库里捞一遍
 export async function keywordCandidates(env, terms, limit = 24) {
   if (!terms.length) return [];

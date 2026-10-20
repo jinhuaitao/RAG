@@ -51,7 +51,7 @@ function authHeaders(env) {
     throw new HttpError(503, "还没有配置第三方模型密钥（API_KEY）", {
       hint: [
         "在 Workers 控制台 Settings → Variables and Secrets 里添加 Secret 类型的 API_KEY，填第三方平台的密钥",
-        "Secret 不会出现在 wrangler.jsonc 里，也不会回传到页面",
+        "Secret 不会出现在代码里，也不会回传到页面",
         "改完点 Retry deployment 重新部署，然后刷新本页",
       ],
     });
@@ -61,16 +61,51 @@ function authHeaders(env) {
   return { [name]: `${prefix}${key}` };
 }
 
+// 聚合站常把上游的 JSON 原文拼进 message 里，取出最内层那句人话，
+// 别把 {"errors":{"message":"…"}} 这种原始 JSON 甩给用户
+function innerMessage(text) {
+  const source = String(text || "");
+  const at = source.indexOf('"message"');
+  if (at < 0) return null;
+  let index = source.indexOf(":", at) + 1;
+  if (index < 1) return null;
+  while (index < source.length && /\s/.test(source[index])) index += 1;
+  if (source[index] !== '"') return null;
+  index += 1;
+  let out = "";
+  while (index < source.length && source[index] !== '"') {
+    if (source[index] === "\\" && source[index + 1]) {
+      out += source[index + 1];
+      index += 2;
+      continue;
+    }
+    out += source[index];
+    index += 1;
+  }
+  return out.trim() || null;
+}
+
+function cleanReason(text) {
+  const source = String(text || "").trim();
+  const nested = innerMessage(source);
+  if (!nested) return source.slice(0, 300);
+  const at = source.indexOf('"message"');
+  const prefix = source.slice(0, at).split("{")[0].replace(/[:\s]+$/, "").trim();
+  return `${prefix ? `${prefix} ` : ""}${nested}`.slice(0, 300);
+}
+
 function providerMessage(payload, text) {
-  if (typeof payload?.error === "string" && payload.error) return payload.error;
-  if (payload?.error?.message) return payload.error.message;
-  if (payload?.error?.code) return String(payload.error.code);
+  let reason;
+  if (typeof payload?.error === "string" && payload.error) reason = payload.error;
+  else if (payload?.error?.message) reason = payload.error.message;
+  else if (payload?.error?.code) reason = payload.error.code;
   // 聚合站（one-api / new-api 这类）把各渠道的失败包成 errors 对象，不是 errors 数组
-  if (payload?.errors?.message) return String(payload.errors.message);
-  if (Array.isArray(payload?.errors) && payload.errors[0]?.message) return String(payload.errors[0].message);
-  if (payload?.message) return String(payload.message);
-  if (payload?.detail) return String(payload.detail);
-  return String(text || "").slice(0, 300);
+  else if (payload?.errors?.message) reason = payload.errors.message;
+  else if (Array.isArray(payload?.errors) && payload.errors[0]?.message) reason = payload.errors[0].message;
+  else if (payload?.message) reason = payload.message;
+  else if (payload?.detail) reason = payload.detail;
+  else reason = text;
+  return cleanReason(reason);
 }
 
 // 上游抱怨「角色不合法 / 最后一条必须是 user」：说明这个网关不认标准的 system+user 形状
@@ -168,7 +203,7 @@ async function callApi(env, path, body) {
     if (error?.name === "AbortError" || /abort/i.test(reason)) {
       throw new HttpError(504, `调用第三方接口超时（${Math.round(timeout / 1000)} 秒）：${url}`, {
         hint: [
-          "把 wrangler.jsonc 的 API_TIMEOUT_MS 调大（当前 " + timeout + " 毫秒）",
+          "把控制台变量 API_TIMEOUT_MS 调大（当前 " + timeout + " 毫秒）",
           "推理模型出答案较慢时可调到 120000",
           "也可以把 CHAT_MAX_TOKENS 调小，缩短生成时间",
         ],
@@ -267,8 +302,13 @@ const CHAT_VARIANTS = [
 const PARAM_FALLBACKS = ["max-completion-tokens", "bare"];
 const SHAPE_FALLBACKS = ["single-user", "single-user-parts"];
 
+// 同一个网关不会每次都换口味：记住上次成功的形状，下次直接用它，省掉一次试探性失败
+const preferredShapes = new Map();
+
 function nextVariant(reason, tried) {
-  const order = SHAPE_ERROR.test(reason) ? SHAPE_FALLBACKS : PARAM_ERROR.test(reason) ? PARAM_FALLBACKS : [];
+  const order = [];
+  if (SHAPE_ERROR.test(reason)) order.push(...SHAPE_FALLBACKS);
+  if (PARAM_ERROR.test(reason)) order.push(...PARAM_FALLBACKS);
   for (const id of order) {
     if (!tried.has(id)) return CHAT_VARIANTS.find((variant) => variant.id === id);
   }
@@ -280,15 +320,16 @@ export async function chatCompletion(env, { messages, temperature = 0.2, maxToke
   if (!model) {
     throw new HttpError(503, "还没有配置生成模型（CHAT_MODEL）", {
       hint: [
-        "在 wrangler.jsonc 的 vars 里把 CHAT_MODEL 改成第三方平台上的模型 ID，例如 gpt-4o-mini、deepseek-chat、qwen-plus",
-        "改完提交到 GitHub，控制台会自动重新部署",
+        "在控制台 Settings → Variables and Secrets 里加一个变量 CHAT_MODEL，填第三方平台上的模型 ID，例如 gpt-4o-mini、deepseek-chat、qwen-plus",
+        "保存后点 Retry deployment 重新部署，再刷新页面",
       ],
     });
   }
   const max = Math.min(MAX_CHAT_TOKENS, Math.max(1, Number(maxTokens) || 1500));
+  const shapeKey = `${apiBase(env)}|${model}`;
   let lastError = null;
   const tried = new Set();
-  let variant = CHAT_VARIANTS[0];
+  let variant = CHAT_VARIANTS.find((item) => item.id === preferredShapes.get(shapeKey)) ?? CHAT_VARIANTS[0];
   while (variant) {
     tried.add(variant.id);
     let payload;
@@ -311,11 +352,12 @@ export async function chatCompletion(env, { messages, temperature = 0.2, maxToke
       throw new HttpError(502, `生成模型 ${model} 只返回了思考过程，正文为空`, {
         hint: [
           "思考过程的 token 也算在 CHAT_MAX_TOKENS 里，当前配置是 " + max,
-          "把 wrangler.jsonc 的 CHAT_MAX_TOKENS 调到 2500–3000 再部署",
+          "把控制台变量 CHAT_MAX_TOKENS 调到 2500–3000 再重新部署",
           "或换用非推理模型（提示词已限制 500 字，但思考长度由模型自己决定）",
         ],
       });
     }
+    preferredShapes.set(shapeKey, variant.id);
     return {
       content: stripped.text.trim(),
       truncated: stripped.truncated,
@@ -335,7 +377,7 @@ export async function embeddings(env, texts) {
   if (!model) {
     throw new HttpError(503, "还没有配置嵌入模型（EMBEDDING_MODEL）", {
       hint: [
-        "在 wrangler.jsonc 的 vars 里把 EMBEDDING_MODEL 改成第三方平台上的嵌入模型 ID，例如 text-embedding-3-small、BAAI/bge-m3",
+        "在控制台 Settings → Variables and Secrets 里加一个变量 EMBEDDING_MODEL，填第三方平台上的嵌入模型 ID，例如 text-embedding-3-small、BAAI/bge-m3",
         "换模型会改变向量维度，必须同时改 EMBEDDING_DIMENSIONS 并重建向量索引",
       ],
     });

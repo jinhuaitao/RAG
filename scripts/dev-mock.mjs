@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import worker from "../src/index.js";
 
 const DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 1536);
+// 假嵌入实际输出的维度：默认与配置一致。设成别的值可以模拟「模型维度与配置对不上」
+const EMBED_DIM = Number(process.env.MOCK_EMBED_DIM || DIMENSIONS);
 const APP_PORT = Number(process.argv[2]) || 8790;
 const API_PORT = APP_PORT + 1;
 const ACCOUNT_ID = "mock-account-0000";
@@ -35,7 +37,7 @@ async function readBody(req) {
 
 // 伪嵌入：字符 2-gram 哈希到固定维度，让「词重叠越多、向量越近」，检索结果才有判别力
 function fakeEmbedding(text) {
-  const vector = new Array(DIMENSIONS).fill(0);
+  const vector = new Array(EMBED_DIM).fill(0);
   const clean = String(text).toLowerCase();
   const grams = [];
   for (let i = 0; i < clean.length - 1; i += 1) grams.push(clean.slice(i, i + 2));
@@ -78,9 +80,31 @@ function mockChat(res, body) {
   } catch (error) {
     return res.writeHead(400, { "content-type": "application/json" }), res.end(JSON.stringify({ error: { message: error.message } }));
   }
-  const user = [...(payload.messages ?? [])].reverse().find((message) => message.role === "user")?.content ?? "";
+  const last = [...(payload.messages ?? [])].reverse().find((message) => message.role === "user");
+  const raw = last?.content;
+  // content 可能是字符串，也可能是 [{type:"text",text:"…"}] 分片
+  const user = typeof raw === "string" ? raw : (raw ?? []).map((part) => part?.text ?? "").join("");
   const context = user.match(/【参考资料】([\s\S]*?)【问题】/)?.[1] ?? "";
   const question = user.match(/【问题】\n([\s\S]*)$/)?.[1]?.trim() ?? "";
+  // 提问里带「模拟失败」就模拟魔搭社区这类网关：只收「最后一条 role 是 user」的单条消息，
+  // 多条消息或非 user 结尾一律拒绝，用来验证自动降级重试
+  if (/模拟失败/.test(question)) {
+    const messages = payload.messages ?? [];
+    const last = messages[messages.length - 1];
+    const single = messages.length === 1 && last?.role === "user";
+    if (!single) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          errors: {
+            message:
+              '所有渠道均失败: 魔搭社区: HTTP 400 {"errors":{"message":"<400> InternalError.Algo.InvalidParameter: Role must be in [\\"user\\", \\"assistant\\", \\"system\\", \\"function\\", \\"plugin\\", \\"tool\\"] and the role in last message must be user"}}',
+          },
+        })
+      );
+      return;
+    }
+  }
   const numbered = [...context.matchAll(/【(\d+)】《([^》]+)》/g)].map(([, n, title]) => `[${n}]《${title}》`);
   const content = context.trim()
     ? `（模拟回答，非真实模型输出）关于“${question}”：依据 ${numbered.join("、") || "[1]"}。`
@@ -177,6 +201,10 @@ async function handleApi(req, res) {
   if (!index) return send(404, envelope(null, [{ message: `Index ${indexName} 不存在，请先初始化` }]));
 
   if (req.method === "GET") return send(200, envelope({ name: indexName, config: index.config }));
+  if (req.method === "DELETE") {
+    indexes.delete(indexName);
+    return send(200, envelope({ name: indexName, deleted: true }));
+  }
 
   if (action === "upsert") {
     const contentType = req.headers["content-type"] || "";

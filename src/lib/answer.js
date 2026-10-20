@@ -68,7 +68,7 @@ export async function generateAnswer(env, { question, passages, terms = [] }) {
   const answer = result.content.trim();
   if (!answer) {
     throw new HttpError(502, `生成模型 ${env.CHAT_MODEL} 没有返回正文`, {
-      hint: `调大 wrangler.jsonc 的 CHAT_MAX_TOKENS（当前 ${maxTokens}）后重试`,
+      hint: `调大控制台变量 CHAT_MAX_TOKENS（当前 ${maxTokens}）后重试`,
     });
   }
   const used = blocks.map((group, index) => ({

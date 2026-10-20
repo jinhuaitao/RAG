@@ -32,6 +32,7 @@
 - [HTTP API](#http-api)
 - [配置项](#配置项)
 - [换模型 / 换维度](#换模型--换维度)
+- [上游接口挑形状：自动降级重试](#上游接口挑形状自动降级重试)
 - [常见问题](#常见问题)
 - [安全说明](#安全说明)
 - [项目结构](#项目结构)
@@ -95,7 +96,7 @@ https://rag-kb.<你的账号子域>.workers.dev
 
 `API_KEY` 必须选 **Secret** 类型（Text 会被任何拿到部署权限的人读到）；`API_URL` 用 Text 即可，它不是机密。
 
-`API_URL` 只填根地址，不要带 `/chat/completions` 之类的完整端点——直接粘完整端点也能用，Worker 会自动截掉。`EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` / `CHAT_MODEL` 三个值在仓库的 `wrangler.jsonc` 里已经给了 OpenAI 的默认值，换平台时改这三个（换嵌入模型必须同时改维度，见[换模型 / 换维度](#换模型--换维度)）。
+`API_URL` 只填根地址，不要带 `/chat/completions` 之类的完整端点——直接粘完整端点也能用，Worker 会自动截掉。`EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` / `CHAT_MODEL` 三个值在 `src/lib/config.js` 里给了 OpenAI 的默认值，换平台时在控制台加同名变量覆盖（换嵌入模型必须同时改维度，见[换模型 / 换维度](#换模型--换维度)）。
 
 改完如果状态未生效，去 **Deployments → 最新一次 → Retry deployment** 重跑一次即可。
 
@@ -109,6 +110,8 @@ https://rag-kb.<你的账号子域>.workers.dev
 2. 点 **初始化资源**
 
 Worker 会依次创建 D1 数据库 `rag-kb-db`、`documents` / `chunks` 两张表、Vectorize 索引 `rag-kb-index`（按 `EMBEDDING_DIMENSIONS` 建，默认 1536 维 / cosine），几秒后横幅消失，顶部状态栏显示「0 篇文档 · 0 个片段 · …」。这个动作**幂等**，重复点只会跳过已存在的资源。
+
+如果账号里已经有一个维度不对的同名索引（换了嵌入模型就会这样），页面会显示「还差一步：重建向量索引」，点**重建索引**即可——Worker 会删掉旧索引按新维度重建，并把库里保存的正文重新嵌入，**文档不用重新上传**。
 
 命令行等价：
 
@@ -214,6 +217,10 @@ curl -s $BASE/api/status
 # 初始化资源（幂等）：建 D1 库 + 两张表 + Vectorize 索引
 curl -s -X POST $BASE/api/admin/setup -H "$AUTH"
 
+# 重建索引后续跑：一次 Worker 调用做不完所有片段时，前端拿着 offset 一批批接着做
+curl -s -X POST $BASE/api/admin/reembed -H "$AUTH" -H 'content-type: application/json' -d '{"offset":150}'
+# → {"ok":true,"total":420,"processed":150,"offset":300,"remaining":120}
+
 # 入库（粘贴文本）
 curl -s -X POST $BASE/api/documents -H "$AUTH" -H 'content-type: application/json' \
   -d '{"title":"退货政策","text":"退货申请需在签收后七天内提交……"}'
@@ -244,7 +251,9 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 
 ## 配置项
 
-`wrangler.jsonc` 的 `vars` 里放不涉及密钥的项（改完重新部署生效——控制台路径下就是往仓库提一次 commit）；涉及密钥的三项走控制台的 **Secret**。
+**环境变量以控制台为唯一来源。** 默认值写在 `src/lib/config.js` 里（代码里），控制台设了同名变量就以控制台的为准；`wrangler.jsonc` 不再声明 `vars`，并打开了 `keep_vars`，所以 **GitHub 每次触发重新部署都不会改动你已经设好的变量与 Secret**。
+
+控制台路径：**Workers & Pages → rag-kb → Settings → Variables and Secrets** 添加变量（Text）或密钥（Secret），保存后点 **Deployments → 最新一次 → Retry deployment** 生效。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -268,31 +277,41 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | `FETCH_TIMEOUT_MS` | `8000` | 网址抓取单跳超时（2–30 秒之间取整） |
 | `FETCH_MAX_BYTES` | `800000` | 网址抓取正文大小上限，超了边读边中断（4–6000000） |
 | `ALLOW_PRIVATE_URLS` | `false` | 设为 `true` 才允许抓本机/内网网址，仅供调试；元数据地址不受它影响 |
+| `CF_API_BASE` | `https://api.cloudflare.com/client/v4` | 内部用，一般不用改 |
 | `ACCOUNT_ID` | 空 | 备用；优先读 Secret `CLOUDFLARE_ACCOUNT_ID` |
 
 除了上表的键，Worker 还需要三个 Secret：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`ADMIN_TOKEN`，见[第 3 步](#第-3-步配三个-secret-和模型接口)。
+
+想永久改默认值（比如把 `API_URL` 的默认地址换成你的平台）就改 `src/lib/config.js` 里的 `DEFAULTS` 再提交；只想调这一个 Worker，在控制台加同名变量即可，不用改代码。
 
 ## 换模型 / 换维度
 
 **只换生成模型**（`CHAT_MODEL`）不影响已有向量，改完部署即可。
 
-**换嵌入模型**会改变向量维度，向量无法迁移，必须重建索引：
+**换嵌入模型**会改变向量维度，旧向量无法迁移。但正文都存在 D1 里，**不需要删掉文档重新上传**：在控制台把 `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` 改掉并重新部署（Retry deployment），再在页面点**初始化资源**——
 
-1. 删掉旧索引（Vectorize 没有可靠的控制台入口，用 API 最稳）：
-
-   ```bash
-   T=<你的 Token>; A=<Account ID>; I=rag-kb-index
-   curl -s -X DELETE -H "authorization: Bearer $T" \
-     "https://api.cloudflare.com/client/v4/accounts/$A/vectorize/v2/indexes/$I"
-   ```
-
-2. 改 `wrangler.jsonc` 的 `EMBEDDING_MODEL`、`EMBEDDING_DIMENSIONS`，建议同时换 `INDEX_NAME`，提交部署。
-3. 页面重新点**初始化资源**建新索引。
-4. 旧文档的向量已失效：在知识库列表里逐篇删除后重新入库。
-
-常用嵌入模型的维度：OpenAI `text-embedding-3-small` = 1536（`text-embedding-3-large` = 3072），`BAAI/bge-m3` = 1024，`BAAI/bge-large-zh-v1.5` = 1024。**维度填错会在入库时报「向量维度不匹配」**，这时按上面的步骤重建即可。
+- 索引维度与配置一致 → 跳过，什么都不做；
+- 维度对不上 → 页面顶部会出现「还差一步：重建向量索引」横幅，点**重建索引**即可。Worker 会先探一次新模型的维度（确认真的能出配置里的维度，不符就在删索引之前拦住），然后删掉旧索引、按新维度重建，并拿库里保存的正文重新嵌入。片段多到一次做不完时会自动分批接着做，页面上能看到进度。
 
 换第三方平台时，除了模型名，通常还要一起改 `API_URL`、`API_KEY`，有时还有 `API_KEY_HEADER` / `API_KEY_PREFIX`（见[配置项](#配置项)）。
+
+常用嵌入模型的维度：OpenAI `text-embedding-3-small` = 1536（`text-embedding-3-large` = 3072），`BAAI/bge-m3` = 1024，`BAAI/bge-large-zh-v1.5` = 1024。**维度填错会在入库时报「向量维度不匹配」**，这时把配置改成模型实际输出的维度，再点一次**重建索引**即可。
+
+## 上游接口挑形状：自动降级重试
+
+不同平台对「请求长什么样」的要求并不统一：有的只认 `max_tokens`，推理模型只认 `max_completion_tokens`；有的网关（例如魔搭社区、部分聚合站）只收「最后一条消息的 role 必须是 user」的单条消息，多一条 `system` 提示就报 `Role must be in [...]`。
+
+Worker 会按上游的报错内容自动换形状重试，顺序是：
+
+| 上游抱怨 | 换成什么 |
+| --- | --- |
+| `max_tokens` / `max_completion_tokens` / `temperature` 不认 | 依次试 `max_completion_tokens` → 去掉生成参数 |
+| `role must be` / `last message must be user` | 把 system 提示并进 user，**只发一条 user 消息** → 内容分片 `[{type:"text"}]` |
+| 其它报错 | 直接把原因抛出来，不做无谓重试 |
+
+成功过的形状会被记住，同一个网关下一次提问直接用对的形状，不再先失败一次试探。
+
+错误提示也会区分「上游不可改」与「你能改」：聚合站把上游 4xx 包成 5xx 返回时（比如 `所有渠道均失败: 魔搭社区: HTTP 400 …`），Worker 会从文本里挖出真实状态码，不会再笼统报成「上游服务异常，等一会儿重试」。
 
 ## 常见问题
 
@@ -300,7 +319,7 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 第 3 步的两个 Secret 没生效。确认名称拼写正确、类型是 **Secret** 而不是 Text，然后 Retry deployment。
 
 **点初始化报「索引已存在但维度是 N，与配置不符」（409）**
-`EMBEDDING_DIMENSIONS` 与账号里同名索引的真实维度不一致。把配置改成实际维度，或删掉那个索引再点。
+`EMBEDDING_DIMENSIONS` 与账号里同名索引的真实维度不一致。**这个错不会再出现了**：现在点**初始化资源**会自动按配置重建索引并重新嵌入库里的正文，文档不用重传。如果重建前发现模型实际输出的维度和配置对不上，会在删索引之前就报错并保留原索引——按提示改 `EMBEDDING_DIMENSIONS` 再点一次即可。
 
 **入库报「向量维度不匹配」**
 `EMBEDDING_MODEL` 的输出维度 ≠ `EMBEDDING_DIMENSIONS`。查该模型的实际维度并改正，然后按[换模型 / 换维度](#换模型--换维度)重建。
@@ -322,6 +341,9 @@ curl -s https://你的接口/v1/embeddings -H 'authorization: Bearer 你的KEY' 
 **问答报「第三方接口限流或额度不足（HTTP 429）」**
 平台按分钟限流或账户余额见底。等一会儿重试，或在平台控制台充值；嵌入与生成是分别计费的，批量入库时尤其容易撞到嵌入的限额。
 
+**问答报「第三方接口不接受当前的对话格式」/ 上游说 `Role must be in [...]`**
+这个网关（魔搭社区、部分聚合站）只收「最后一条消息 role 是 user」的单条消息。Worker 已经自动改成只发一条 user 消息重试过，仍被拒说明它还有别的格式要求：换一个 `CHAT_MODEL`，或把 `API_URL` 指向该平台的直连兼容地址。报错里出现「所有渠道均失败」说明你在用聚合站——它会逐个渠道转发，每个渠道支持的模型与请求格式都不一样。
+
 **抓不到正文 / 报 422**
 只有服务端返回的 HTML 抓得到；靠 JavaScript 现渲染的页面（大多数 SPA、需要登录的站点、带反爬的站点）抓不到，返回 422 并提示改用「粘贴正文」——在浏览器里全选复制即可，效果一样。
 
@@ -338,6 +360,9 @@ curl -s https://你的接口/v1/embeddings -H 'authorization: Bearer 你的KEY' 
 
 **忘了 `ADMIN_TOKEN`**
 它只以 Secret 形式存在 Worker 侧，无法查看。在控制台 Settings 里删掉再设一个新值，页面右上角填新值即可，知识库数据不受影响。
+
+**GitHub 触发重新部署后，控制台里设的变量/密钥被冲掉了？**
+不会。环境变量以控制台为唯一来源：`wrangler.jsonc` 里不声明 `vars`（默认值在 `src/lib/config.js`），并打开了 `keep_vars`，所以 `wrangler deploy` 只上传代码、不覆盖控制台里已有的变量；Secret 也不会被部署删除。只有两种情况会改值：在控制台主动改了，或在 GitHub 仓库里配了 `API_KEY` 这个 Secret（工作流会用它覆盖同名 Secret；不配就完全不动）。
 
 **问答报「第三方接口拒绝了这次请求（HTTP 400）」**
 多半是某个生成参数这个平台不认。Worker 已经做了逐级降级：先发 `{model, messages, temperature, max_tokens}`，被拒就改成 `{model, messages, max_completion_tokens}`，再被拒就只发 `{model, messages}`——所以「老平台只认 `max_completion_tokens`」「新推理模型不收 `temperature`」这类差异不用自己处理。若连最简请求都被拒，看提示里的请求地址，确认 `API_URL` 指向的是 OpenAI 兼容的接口根地址，而不是某个网页。
@@ -369,9 +394,10 @@ Workers 免费计划含每天 10 万次请求；Vectorize 免费计划可建索�
 ## 项目结构
 
 ```
-wrangler.jsonc           只声明 Assets 绑定，以及所有可调参数
+wrangler.jsonc           只声明 Assets 绑定与 keep_vars（环境变量以控制台为准）
 schema.sql               由 src/lib/schema.js 导出的建表 SQL（仅作参考，运行时不读文件）
 src/index.js             路由、鉴权、参数校验，唯一的 HTTP 入口
+src/lib/config.js        环境变量默认值与合并规则（控制台的值优先）
 src/lib/cfapi.js         Cloudflare REST API 封装：D1 建库/查询、Vectorize 建索引/NDJSON 写入/检索/删除
 src/lib/setup.js         「初始化资源」的幂等逻辑与 provisioning 状态探测
 src/lib/store.js         通过 REST 读写 D1（切片原文按向量 id 回查）
@@ -388,6 +414,7 @@ fixtures/              示例网页，供本地端到端抓取与测试使用
 scripts/dev-mock.mjs     离线端到端模拟，含假的 Cloudflare REST API 与假的模型接口
 scripts/deploy.sh        附录 A 的命令行部署路径
 scripts/test.mjs         切片、清洗、网址抓取、检索重排与模型接口层的回归测试
+scripts/test-e2e.mjs     端到端回归：初始化 → 入库 → 检索 → 问答 → 索引重建
 scripts/check.sh         语法检查
 .github/workflows/       附录 B 的 GitHub Actions 部署路径
 ```
@@ -405,9 +432,9 @@ npm install
 bash scripts/deploy.sh      # 等价 npm run setup
 ```
 
-脚本做三件事：`wrangler deploy` → 把上述环境变量写成 Secret → 打印剩下的浏览器步骤。未提供的变量会被跳过并提示。
+脚本做三件事：`wrangler deploy` → 把上述环境变量写成 Secret → 打印剩下的浏览器步骤。未提供的变量会被跳过并提示，不会把控制台里已有的值覆盖成空。
 
-`API_URL` 是普通变量不是密钥，留在 `wrangler.jsonc` 的 `vars` 里即可；也可以在控制台改，不用重新部署代码。
+`API_URL` 是普通变量不是密钥，在控制台加一个同名变量即可；`wrangler deploy` 带着 `keep_vars`，不会动控制台里已有的变量与 Secret。
 
 ## 附录 B：GitHub Actions 自动部署
 
@@ -418,9 +445,13 @@ bash scripts/deploy.sh      # 等价 npm run setup
 ```
 CLOUDFLARE_ACCOUNT_ID   = 你的 Account ID
 CLOUDFLARE_API_TOKEN    = 权限见第 3 步表格
-API_KEY                 = 第三方平台密钥
+API_KEY                 = 第三方平台密钥（可留空）
 ```
 
-`ADMIN_TOKEN` 与 `API_URL` 不在这个列表里：`ADMIN_TOKEN` 在控制台手动设一次即可，`API_URL` 是普通变量，跟代码一起在 `wrangler.jsonc` 里。
+`ADMIN_TOKEN` 与 `API_URL` 不在这个列表里：`ADMIN_TOKEN` 在控制台手动设一次即可，`API_URL` 是普通变量，也在控制台设（`wrangler.jsonc` 里不声明 `vars`，控制台就是唯一来源）。
+
+`API_KEY` 这一项可留空：留空时工作流**跳过写入**，控制台里手工设的 `API_KEY` 原样保留；填了则以仓库里的为准（这是 GitOps 的本意）。
+
+> **每次 push 触发的重新部署都不会覆盖你设过的环境变量。** `wrangler.jsonc` 里没有 `vars`，并打开了 `keep_vars`，部署只上传代码；Secret 也不会被部署删除，只有显式执行 `wrangler secret put` 才会覆盖某一个。
 
 与控制台连 Git 二选一即可，同时启用会互相覆盖同一个 Worker。

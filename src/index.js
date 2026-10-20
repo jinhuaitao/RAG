@@ -6,8 +6,9 @@ import { countAll, deleteDocumentRows, getChunkRows, keywordCandidates, listChun
 import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
 import { extractTerms, keywordTerms, overlapScore, rankCandidates, stripOverlap } from "./lib/rank.js";
 import { generateAnswer } from "./lib/answer.js";
-import { initialize, provisionStatus } from "./lib/setup.js";
+import { initialize, continueReembed, provisionStatus } from "./lib/setup.js";
 import { apiHost, isConfigured } from "./lib/llm.js";
+import { withDefaults } from "./lib/config.js";
 
 const TOP_K_LIMIT = 20;
 const RECALL_POOL_MAX = 24;
@@ -17,7 +18,8 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
     try {
-      return await route(request, env, url);
+      // 控制台里的变量优先，缺的那些用代码里的默认值补齐
+      return await route(request, withDefaults(env), url);
     } catch (error) {
       return fail(error);
     }
@@ -42,9 +44,21 @@ async function route(request, env, url) {
   if (docMatch && method === "DELETE") return remove(env, docMatch[1]);
   if (method === "POST" && path === "/api/ask") return ask(env, request);
   if (method === "POST" && path === "/api/admin/setup") return json(await initialize(env));
+  if (method === "POST" && path === "/api/admin/reembed") {
+    const body = await readJson(request, 1024);
+    return json({ ok: true, ...(await continueReembed(env, body.offset)) });
+  }
 
   throw new HttpError(404, `未知接口 ${method} ${path}`, {
-    endpoints: ["GET /api/status", "POST /api/admin/setup", "POST /api/documents", "GET /api/documents", "DELETE /api/documents/:id", "POST /api/ask"],
+    endpoints: [
+      "GET /api/status",
+      "POST /api/admin/setup",
+      "POST /api/admin/reembed",
+      "POST /api/documents",
+      "GET /api/documents",
+      "DELETE /api/documents/:id",
+      "POST /api/ask",
+    ],
   });
 }
 
@@ -53,7 +67,9 @@ async function status(env) {
   return json({
     ok: true,
     auth_required: Boolean(env.ADMIN_TOKEN),
-    provisioned: Boolean(provision.credentials && provision.database && provision.tables && provision.index),
+    provisioned: Boolean(
+      provision.credentials && provision.database && provision.tables && provision.index && !provision.index.mismatch
+    ),
     llm_ready: isConfigured(env),
     provision,
     config: {

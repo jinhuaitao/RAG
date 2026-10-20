@@ -9,10 +9,40 @@ import { generateAnswer } from "../src/lib/answer.js";
 import { apiBase, chatCompletion, embeddings, isConfigured } from "../src/lib/llm.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 import { chunkInsertStatements, groupStatements } from "../src/lib/store.js";
+import { DEFAULTS, withDefaults } from "../src/lib/config.js";
 
 const cases = [];
 function test(name, fn) {
   cases.push([name, fn]);
+}
+
+// wrangler.jsonc 允许 // 注释，JSON.parse 读不了
+function parseJsonc(text) {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i += 1;
+      out += "\n";
+      continue;
+    }
+    out += ch;
+  }
+  return JSON.parse(out);
 }
 
 test("短文本只出一个片段", () => {
@@ -539,6 +569,115 @@ test("第三方接口：上游的普通 400 不做无谓重试，直接把原因
       assert.ok(/maximum context length/.test(thrown.message), thrown?.message);
     }
   );
+});
+
+test("第三方接口：聚合站把上游 400 包成 5xx，要按真实状态码说人话", async () => {
+  let calls = 0;
+  const body = {
+    errors: {
+      message:
+        '所有渠道均失败: 魔搭社区: HTTP 400 {"errors":{"message":"<400> InternalError.Algo.InvalidParameter: 模型不存在"}}',
+    },
+  };
+  await withFetch(
+    async () => {
+      calls += 1;
+      return jsonResponse(body, 500);
+    },
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion({ ...LLM_ENV, CHAT_MODEL: "demo/aggregator" }, { messages: [{ role: "user", content: "hi" }] });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.equal(calls, 1, "无关错误不该重试");
+      assert.ok(/HTTP 400/.test(thrown.message), thrown?.message);
+      assert.ok(/模型不存在/.test(thrown.message), thrown?.message);
+      assert.ok(!thrown.message.includes('{"errors"'), `原始 JSON 不该外泄：${thrown.message}`);
+      const hint = String(thrown.details?.hint);
+      assert.ok(!hint.includes("上游服务异常"), hint);
+      assert.ok(hint.includes("聚合站"), hint);
+    }
+  );
+});
+
+test("第三方接口：上游只收单条 user 消息时，自动降级形状后重试成功", async () => {
+  const bodies = [];
+  const result = await withFetch(
+    async (url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (body.messages.length > 1) {
+        const message =
+          '<400> InternalError.Algo.InvalidParameter: Role must be in ["user", "assistant", "system", "function", "plugin", "tool"] and the role in last message must be user';
+        return jsonResponse({ errors: { message } }, 500);
+      }
+      return jsonResponse({ choices: [{ message: { role: "assistant", content: "可以。" } }] });
+    },
+    () =>
+      chatCompletion({ ...LLM_ENV, CHAT_MODEL: "demo/modelscope" }, {
+        messages: [
+          { role: "system", content: "你是客服" },
+          { role: "user", content: "退货要几天" },
+        ],
+        maxTokens: 800,
+      })
+  );
+  assert.equal(result.content, "可以。");
+  assert.equal(bodies.length, 2, `应降级重试一次，实际 ${bodies.length} 次`);
+  assert.equal(bodies[1].messages.length, 1, "降级后只发一条消息");
+  assert.equal(bodies[1].messages[0].role, "user");
+  assert.ok(bodies[1].messages[0].content.includes("你是客服"), "system 提示词要并进 user 消息");
+});
+
+test("第三方接口：形状降级也救不了时，报错要点明是格式问题而不是服务故障", async () => {
+  let calls = 0;
+  await withFetch(
+    async () => {
+      calls += 1;
+      return jsonResponse({ errors: { message: "Role must be in [\"user\"] and the role in last message must be user" } }, 400);
+    },
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion(
+          { ...LLM_ENV, CHAT_MODEL: "demo/stubborn" },
+          { messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }] }
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.ok(calls >= 2, `应尝试降级形状，实际 ${calls} 次`);
+      assert.ok(/对话格式/.test(thrown.message), thrown?.message);
+      assert.ok(!/上游服务异常/.test(String(thrown.details?.hint)), JSON.stringify(thrown.details));
+    }
+  );
+});
+
+test("环境变量：控制台的值优先，缺的用代码里的默认值补齐", () => {
+  const merged = withDefaults({ API_URL: "https://my-gateway.example/v1", ADMIN_TOKEN: "abc" });
+  assert.equal(merged.API_URL, "https://my-gateway.example/v1", "控制台的值要压过默认值");
+  assert.equal(merged.ADMIN_TOKEN, "abc", "代码里没有默认值的键要原样带过去");
+  assert.equal(merged.EMBEDDING_DIMENSIONS, "1536", "没配的项要落到默认值");
+  assert.equal(merged.CHAT_MODEL, "gpt-4o-mini");
+});
+
+test("环境变量：显式设成空字符串算用户的选择，不回落默认值", () => {
+  const merged = withDefaults({ API_KEY_PREFIX: "" });
+  assert.equal(merged.API_KEY_PREFIX, "", "空前缀表示平台要裸 Key，不能被默认值顶掉");
+  const undefinedValue = withDefaults({ API_URL: undefined, EMBEDDING_MODEL: null });
+  assert.equal(undefinedValue.API_URL, DEFAULTS.API_URL, "undefined 视为没配");
+  assert.equal(undefinedValue.EMBEDDING_MODEL, DEFAULTS.EMBEDDING_MODEL, "null 视为没配");
+});
+
+test("部署配置：不声明 vars 且打开 keep_vars，控制台的变量才不会被重新部署冲掉", () => {
+  const config = parseJsonc(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.keep_vars, true, "wrangler.jsonc 必须开 keep_vars");
+  assert.equal(config.vars, undefined, "wrangler.jsonc 不能声明 vars：声明了就会在部署时覆盖控制台的值");
+  assert.equal(config.assets?.binding, "ASSETS", "Assets 绑定要留着");
 });
 
 let failed = 0;

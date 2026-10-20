@@ -171,6 +171,11 @@ export const vectorize = {
     }
   },
 
+  // 删索引是破坏性操作：调用方必须确认旧向量已经用不上（维度或模型变了）
+  async deleteIndex(env, name) {
+    return call(env, `/accounts/{account_id}/vectorize/v2/indexes/${encodeURIComponent(name)}`, { method: "DELETE" });
+  },
+
   async upsert(env, name, items) {
     const body = items
       .map((item) => JSON.stringify({ ...item, values: encodeVector(item.values) }))

@@ -27,13 +27,29 @@ function assertDimensions(env, vector) {
       `向量维度不匹配：模型 ${env.EMBEDDING_MODEL} 输出 ${vector.length} 维，但配置与向量索引是 ${expected} 维`,
       {
         hint: [
-          `1) 把 wrangler.jsonc 里的 EMBEDDING_DIMENSIONS 改成 ${vector.length}`,
-          `2) 换维度需要重建索引：控制台删除 ${env.INDEX_NAME} 后点“初始化资源”`,
-          "3) 之后把文档删掉重新入库（向量无法迁移）",
+          `1) 把控制台变量 EMBEDDING_DIMENSIONS 改成 ${vector.length}`,
+          `2) 或者换一个输出 ${expected} 维的嵌入模型`,
+          "3) 改完重新部署，在页面点「初始化资源」——索引维度不符时它会按新维度重建并自动重新嵌入",
         ],
       }
     );
   }
+}
+
+async function upsertItems(env, items) {
+  const mutations = [];
+  for (let i = 0; i < items.length; i += UPSERT_BATCH) {
+    const result = await vectorize.upsert(env, env.INDEX_NAME, items.slice(i, i + UPSERT_BATCH));
+    if (result?.error) throw new HttpError(502, `向量写入失败：${result.error}`);
+    if (result?.mutationId) mutations.push(result.mutationId);
+  }
+  return mutations;
+}
+
+// 删索引前先探一次新模型的维度：模型与配置不符时要在删之前就拦下来
+export async function probeDimensions(env) {
+  const [vector] = await embed(env, ["维度探测"]);
+  return vector.length;
 }
 
 export async function indexDocument(env, docId, chunks) {
@@ -43,13 +59,21 @@ export async function indexDocument(env, docId, chunks) {
     values: vectors[ordinal],
     metadata: { docId, ordinal },
   }));
-  const mutations = [];
-  for (let i = 0; i < items.length; i += UPSERT_BATCH) {
-    const result = await vectorize.upsert(env, env.INDEX_NAME, items.slice(i, i + UPSERT_BATCH));
-    if (result?.error) throw new HttpError(502, `向量写入失败：${result.error}`);
-    if (result?.mutationId) mutations.push(result.mutationId);
-  }
+  const mutations = await upsertItems(env, items);
   // Vectorize 写入是异步排队的，mutation 生效前检索可能查不到刚入库的片段
+  return { count: items.length, model: env.EMBEDDING_MODEL, dimensions: vectors[0]?.length ?? 0, mutations };
+}
+
+// 重建索引后把 D1 里的正文重新嵌入：向量无法迁移，但原文都还在库里，文档不用重新上传
+export async function reembedChunks(env, rows) {
+  if (!rows.length) return { count: 0, model: env.EMBEDDING_MODEL, dimensions: Number(env.EMBEDDING_DIMENSIONS), mutations: [] };
+  const vectors = await embed(env, rows.map((row) => row.content));
+  const items = rows.map((row, index) => ({
+    id: row.id,
+    values: vectors[index],
+    metadata: { docId: row.doc_id, ordinal: row.ordinal },
+  }));
+  const mutations = await upsertItems(env, items);
   return { count: items.length, model: env.EMBEDDING_MODEL, dimensions: vectors[0]?.length ?? 0, mutations };
 }
 

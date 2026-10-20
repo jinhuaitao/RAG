@@ -31,5 +31,5 @@ cat <<'EOF'
   2. 点页面上的「初始化资源」，Worker 会自动创建 D1 数据库、两张表和 Vectorize 索引
      （等价命令：curl -X POST $BASE/api/admin/setup -H "authorization: Bearer $ADMIN_TOKEN"）
 
-提示：API_URL 是普通变量，在 wrangler.jsonc 的 vars 里；换平台时改它和模型名即可。
+提示：API_URL 等普通变量在控制台加同名变量即可（部署带 keep_vars，不会覆盖控制台里已有的值）。
 EOF
