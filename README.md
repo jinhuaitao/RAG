@@ -445,7 +445,6 @@ Workers 每次请求能发起的**外部调用（子请求）**是有硬额度�
 Workers 免费计划含每天 10 万次请求；Vectorize 免费计划可建索引并存放有限向量。模型费用走**第三方平台**，按平台自己的单价计费：嵌入按 token 计（每次入库 ≈ 片段数 × 数百 token），生成按 token 计（本项目每次提问约 6–8k 输入 + ≤1.5k 输出）。同一个平台上换更便宜的模型最直接——例如把 `CHAT_MODEL` 从旗舰推理模型换成 `gpt-4o-mini` / `deepseek-chat` / `qwen-turbo` 一类，一次提问的成本能降一个量级。规模化前请在第三方平台的控制台核对当前配额与单价说明；部分平台赠送的新客额度足够小规模试用，但**嵌入与生成分别计费**，批量入库时嵌入那一项往往先见底。
 
 ## 安全说明
-
 - **访问令牌强制**：Worker 持有的 API Token 能创建/删除资源，因此除 `/api/status` 外所有接口都要求 `Authorization: Bearer <ADMIN_TOKEN>`，未设置该 Secret 时接口直接返回 403 并给出配置指引。令牌比较走 `crypto.timingSafeEqual`。
 - **Token 最小化**：请只授予上表那几项权限，不要把 Global Key 或 Zone 权限塞进来；这个 Token 会随每次请求出现在 Worker 的出站头里。
 - **不会被注入**：文档正文、回答与来源一律用 `textContent` 渲染，不执行任何 HTML；SQL 全部走占位符参数。
