@@ -135,7 +135,13 @@ function renderStatus() {
   const parts = [];
   if (state.counts) parts.push(`${state.counts.docs} 篇文档 · ${state.counts.chunks} 个片段`);
   if (status.config.api_host) parts.push(`接口 ${status.config.api_host}`);
-  parts.push(`嵌入 ${status.config.embedding_model}（${status.config.embedding_dimensions} 维）`);
+  // 嵌入单独走另一个平台时，把它的地址也摆出来，别让人以为走的是同一个
+  if (status.config.embedding_api_host && status.config.embedding_api_host !== status.config.api_host) {
+    parts.push(`嵌入接口 ${status.config.embedding_api_host}`);
+  }
+  // 嵌入走的是 Workers AI 还是第三方平台，说清楚
+  const provider = status.config.embedding_provider === "workers-ai" ? " · Workers AI" : "";
+  parts.push(`嵌入 ${status.config.embedding_model}（${status.config.embedding_dimensions} 维${provider}）`);
   parts.push(`生成 ${status.config.chat_model}`);
   $("statusLine").textContent = parts.join(" · ");
 

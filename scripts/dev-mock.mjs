@@ -163,6 +163,19 @@ async function handleApi(req, res) {
     return send(401, envelope(null, [{ code: 10000, message: "Authentication error" }]));
   }
 
+  // Workers AI：POST /accounts/{id}/ai/run/{model}，返回 { data: [[…]], shape: [n, dim] }
+  const aiMatch = path.match(/^\/ai\/run\/(.+)$/);
+  if (aiMatch) {
+    const model = decodeURIComponent(aiMatch[1]);
+    if (!/bge|embed/i.test(model)) {
+      return send(400, envelope(null, [{ code: 7003, message: `Could not process request: model ${model} not found` }]));
+    }
+    const payload = JSON.parse(body || "{}");
+    const input = Array.isArray(payload.text) ? payload.text : [payload.text];
+    const data = input.map((text) => fakeEmbedding(text));
+    return send(200, envelope({ data, shape: [data.length, DIMENSIONS] }));
+  }
+
   // D1：列库 / 建库
   if (path === "/d1/database" && req.method === "GET") {
     return send(200, envelope([...databases].map(([uuid, database]) => ({ uuid, name: database.name }))));
@@ -318,6 +331,8 @@ const env = {
   EMBEDDING_MODEL: process.env.EMBEDDING_MODEL || "mock/bge-m3",
   EMBEDDING_DIMENSIONS: String(DIMENSIONS),
   EMBEDDING_METRIC: "cosine",
+  EMBEDDING_PROVIDER: process.env.EMBEDDING_PROVIDER || "",
+  EMBEDDING_MAX_CHARS: process.env.EMBEDDING_MAX_CHARS || "400",
   CHAT_MODEL: process.env.CHAT_MODEL || "mock/llama",
   CHAT_MAX_TOKENS: "1500",
   TOP_K: "6",

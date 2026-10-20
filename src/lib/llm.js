@@ -1,4 +1,5 @@
 import { HttpError } from "./http.js";
+import { normalizeModel as normalizeWorkersAiModel, workersAiEmbeddings } from "./workersai.js";
 
 // 第三方 OpenAI 兼容接口：嵌入与生成都走这里，Worker 不再依赖 Workers AI 绑定。
 // 约定：API_URL 填到 /v1 这一层（如 https://api.openai.com/v1），API_KEY 作为 Secret 配置。
@@ -41,12 +42,38 @@ export function apiHost(env) {
   }
 }
 
+// 嵌入走哪个提供方：EMBEDDING_PROVIDER 说了算；没写就看模型 ID——@cf/ 开头的是 Workers AI 的模型
+export function embeddingProvider(env) {
+  const explicit = String(env.EMBEDDING_PROVIDER || "").trim().toLowerCase();
+  if (explicit === "workers-ai" || explicit === "workersai" || explicit === "cf") return "workers-ai";
+  if (explicit === "third-party" || explicit === "thirdparty" || explicit === "openai") return "third-party";
+  return String(env.EMBEDDING_MODEL || "").trim().startsWith("@cf/") ? "workers-ai" : "third-party";
+}
+
+// 有些聚合站只提供对话模型，没有向量模型；这时可以单独指定做嵌入的平台
+export function embeddingApiHost(env) {
+  if (embeddingProvider(env) === "workers-ai") {
+    try {
+      return new URL(String(env.CF_API_BASE || "https://api.cloudflare.com/client/v4")).host;
+    } catch {
+      return "api.cloudflare.com";
+    }
+  }
+  const url = String(env.EMBEDDING_API_URL || "").trim();
+  if (!url) return apiHost(env);
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
 export function isConfigured(env) {
   return Boolean(String(env.API_URL || "").trim() && String(env.API_KEY || "").trim());
 }
 
-function authHeaders(env) {
-  const key = String(env.API_KEY || "").trim();
+function authHeaders(env, keyOverride) {
+  const key = String(keyOverride ?? env.API_KEY ?? "").trim();
   if (!key) {
     throw new HttpError(503, "还没有配置第三方模型密钥（API_KEY）", {
       hint: [
@@ -59,6 +86,27 @@ function authHeaders(env) {
   const name = String(env.API_KEY_HEADER || "authorization").trim() || "authorization";
   const prefix = env.API_KEY_PREFIX === undefined ? "Bearer " : String(env.API_KEY_PREFIX);
   return { [name]: `${prefix}${key}` };
+}
+
+// 嵌入走哪个平台：EMBEDDING_API_URL / EMBEDDING_API_KEY 没配就用主接口的那一套
+function embeddingTarget(env) {
+  const url = String(env.EMBEDDING_API_URL || "").trim();
+  const key = String(env.EMBEDDING_API_KEY || "").trim();
+  const fallbackKey = String(env.API_KEY || "").trim();
+  if (!url && !String(env.API_URL || "").trim()) {
+    throw new HttpError(503, "还没有配置嵌入用的接口地址（EMBEDDING_API_URL 或 API_URL）", {
+      hint: [
+        "在 Workers 控制台 Settings → Variables and Secrets 里添加变量 EMBEDDING_API_URL（向量接口根地址，填到 /v1 这一层）",
+        "只配 API_URL 也可以：这时嵌入和生成用同一个平台",
+        "改完点 Retry deployment 重新部署，然后刷新本页",
+      ],
+    });
+  }
+  return {
+    base: url ? apiBase({ API_URL: url }) : apiBase(env),
+    key: key || fallbackKey,
+    separate: Boolean(url),
+  };
 }
 
 // 聚合站常把上游的 JSON 原文拼进 message 里，取出最内层那句人话，
@@ -117,15 +165,17 @@ const PARAM_ERROR = /max_tokens|max_completion_tokens|temperature/i;
 const AGGREGATOR = /所有渠道均失败|所有渠道失败|all channels failed/i;
 // 上游说「这个模型不存在」：多半是把聊天模型当成了嵌入模型，或模型 ID 写错
 const MODEL_MISSING = /model not found|no such model|unknown model|invalid model|模型不存在|没有这个模型|model_not_found|unsupported model/i;
+// 聚合站说「没有可用渠道」：模型 ID 不在它登记的名单里（多半是少了渠道后缀）
+const NO_CHANNEL = /没有可用渠道|no available channel|no_channel|no available channel/i;
 // 名字里带这些片段的，多半是向量化模型（平台一般不给聊天模型起这种名字）
 const EMBEDDING_NAME = /embedding|embed|bge|gte|e5|m3e|jina|nomic|mxbai|bce|stella|gritlm|conan|paraphrase|granite/i;
 
 // 平台侧的模型清单：上游说模型不存在时，直接用它告诉用户该填哪个
-export async function listModelIds(env) {
+export async function listModelIds(env, target = null) {
   let response;
   try {
-    response = await fetch(`${apiBase(env)}/models`, {
-      headers: authHeaders(env),
+    response = await fetch(`${target?.base ?? apiBase(env)}/models`, {
+      headers: authHeaders(env, target?.key),
       signal: AbortSignal.timeout(8_000),
     });
   } catch {
@@ -148,25 +198,41 @@ function pickModels(ids, kind) {
   return chatLike.length ? chatLike : embeddingLike;
 }
 
-// 上游说「模型不存在」时，别只回一句「模型 ID 不存在」：
+// 上游说「模型不存在」或「没有可用渠道」时，别只回一句「模型 ID 不存在」：
 // 把当前填的是哪个变量、平台上到底有哪些模型、维度要怎么跟着改，一次说清
-async function modelMissingError(env, kind, model, reason) {
-  const ids = await listModelIds(env);
-  const candidates = pickModels(ids, kind);
+async function modelMissingError(env, kind, model, reason, mode = "missing") {
+  const target = kind === "embedding" ? embeddingTarget(env) : null;
+  const ids = await listModelIds(env, target);
   const isEmbedding = kind === "embedding";
   const label = isEmbedding ? "嵌入模型" : "生成模型";
   const variable = isEmbedding ? "EMBEDDING_MODEL" : "CHAT_MODEL";
+  const embeddingLike = ids.filter((id) => EMBEDDING_NAME.test(id));
+  const candidates = pickModels(ids, kind);
 
-  const hint = [
-    `当前 ${variable} = ${model}`,
-    isEmbedding
-      ? "嵌入模型要能输出向量，聊天模型不能用来做嵌入（DeepSeek / GPT / Claude 这类只能回答问题）"
-      : "生成模型要能回答问题，嵌入模型不能用来生成回答",
-  ];
+  const hint = [`当前 ${variable} = ${model}`];
+  if (mode === "noChannel") {
+    if (isEmbedding) {
+      hint.push("这个平台上没有这个嵌入模型：聚合站的对话渠道挂了它，但没人提供向量接口");
+      hint.push("或者把 EMBEDDING_MODEL 改成 @cf/baai/bge-m3：嵌入改走 Cloudflare 自带的 Workers AI（1024 维），不需要额外的密钥");
+    } else {
+      hint.push("模型 ID 要用平台上登记的完整名称，聚合站常给同一个模型挂不同渠道后缀（例如 DeepSeek-V4-Flash(AMD)）");
+    }
+  } else if (isEmbedding) {
+    hint.push("嵌入模型要能输出向量，聊天模型不能用来做嵌入（DeepSeek / GPT / Claude 这类只能回答问题）");
+  } else {
+    hint.push("生成模型要能回答问题，嵌入模型不能用来生成回答");
+  }
   if (isEmbedding && String(env.CHAT_MODEL || "").trim() === model) {
     hint.push("EMBEDDING_MODEL 和 CHAT_MODEL 填成了同一个模型 —— 这两个必须是两个不同的模型");
   }
-  if (candidates.length) {
+
+  const noEmbedding = isEmbedding && ids.length > 0 && embeddingLike.length === 0;
+  if (noEmbedding) {
+    // 平台上根本没有向量模型：别把对话模型列成「可用的嵌入模型」
+    hint.push(`这个平台的清单里一个向量模型都没有（只有 ${ids.slice(0, 6).join("、")} 这类对话模型）—— 入库没法在它上面做`);
+    hint.push("另配一个能嵌入的平台：控制台加 EMBEDDING_API_URL（向量接口根地址）与 EMBEDDING_API_KEY（那个平台的密钥），嵌入走它、生成仍走现在的平台");
+    hint.push("或者把 EMBEDDING_MODEL 改成 @cf/baai/bge-m3：嵌入改走 Cloudflare 自带的 Workers AI（1024 维），不需要额外的密钥");
+  } else if (candidates.length) {
     hint.push(`这个平台上可用的${label}：${candidates.slice(0, 8).join("、")}`);
   } else if (ids.length) {
     hint.push(`这个平台返回了 ${ids.length} 个模型，但没找到常见的${label}，确认平台上是否提供向量模型`);
@@ -177,11 +243,14 @@ async function modelMissingError(env, kind, model, reason) {
     hint.push("入库走的 /embeddings 地址没错，问题在模型 ID：嵌入必须用向量模型");
     hint.push("换模型要同步改 EMBEDDING_DIMENSIONS（bge-m3=1024、text-embedding-3-small=1536、Qwen3-Embedding-8B=4096）");
     hint.push("改完重新部署，点「初始化资源」按新维度重建索引");
+  } else if (candidates.length) {
+    hint.push(`改完把控制台变量 ${variable} 改成上面的名字，再重新部署即可`);
   }
   if (AGGREGATOR.test(reason)) {
     hint.push("「所有渠道均失败」说明是聚合站逐个渠道转发：这个模型在它挂的渠道里都不是向量模型");
   }
-  return new HttpError(502, `第三方平台没有这个${label}：${reason}`, { hint });
+  const title = mode === "noChannel" ? `第三方平台没有这个${label}的可用渠道：${reason}` : `第三方平台没有这个${label}：${reason}`;
+  return new HttpError(502, title, { hint });
 }
 
 // 把上游返回的失败翻译成能直接照着做的中文提示：分清「不可改的」与「可修的」
@@ -209,6 +278,15 @@ function buildProviderError(status, payload, text, url) {
         "换 CHAT_MODEL，或把 API_URL 换成该平台的直连兼容地址再试",
       ],
     });
+  }
+
+  // 模型 ID 不在平台名单里：这是配置错了，不是服务故障，单独标出来
+  if (NO_CHANNEL.test(haystack)) {
+    const error = new HttpError(502, `第三方平台没有这个模型的可用渠道：${reason}`, {
+      hint: ["模型 ID 要用平台上登记的完整名称，聚合站常给同一模型挂不同渠道后缀"],
+    });
+    error.noChannel = true;
+    return error;
   }
 
   // 聚合站返回的 5xx 里裹着上游的 4xx，按文本里挖到的状态码判断，别一律当成服务端故障
@@ -258,10 +336,10 @@ function buildProviderError(status, payload, text, url) {
   });
 }
 
-async function callApi(env, path, body) {
-  const base = apiBase(env);
+async function callApi(env, path, body, target = null) {
+  const base = target?.base ?? apiBase(env);
   const url = `${base}${path}`;
-  const headers = { "content-type": "application/json", ...authHeaders(env) };
+  const headers = { "content-type": "application/json", ...authHeaders(env, target?.key) };
   const timeout = Math.min(MAX_TIMEOUT_MS, Math.max(5_000, Number(env.API_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -413,7 +491,8 @@ export async function chatCompletion(env, { messages, temperature = 0.2, maxToke
       payload = await callApi(env, "/chat/completions", variant.build(model, messages, temperature, max));
     } catch (error) {
       const reason = String(error?.providerReason ?? error?.message ?? error);
-      // 模型不存在时换请求形状也没用，直接说清楚该改哪个变量
+      // 模型不存在 / 没有可用渠道时换请求形状也没用，直接说清楚该改哪个变量
+      if (error?.noChannel) throw await modelMissingError(env, "chat", model, reason, "noChannel");
       if (MODEL_MISSING.test(reason)) throw await modelMissingError(env, "chat", model, reason);
       lastError = error;
       variant = nextVariant(reason, tried);
@@ -457,15 +536,29 @@ export async function embeddings(env, texts) {
     throw new HttpError(503, "还没有配置嵌入模型（EMBEDDING_MODEL）", {
       hint: [
         "在控制台 Settings → Variables and Secrets 里加一个变量 EMBEDDING_MODEL，填第三方平台上的嵌入模型 ID，例如 text-embedding-3-small、BAAI/bge-m3",
+        "用 Workers AI 的话填 @cf/baai/bge-m3（1024 维），不需要额外的模型密钥",
         "换模型会改变向量维度，必须同时改 EMBEDDING_DIMENSIONS 并重建向量索引",
+      ],
+    });
+  }
+  // Workers AI 是 Cloudflare 自家的向量模型，走 Cloudflare 的 REST API，不需要额外的模型密钥
+  if (embeddingProvider(env) === "workers-ai") return workersAiEmbeddings(env, texts);
+  const target = embeddingTarget(env);
+  if (!target.key) {
+    throw new HttpError(503, "还没有配置嵌入用的密钥（EMBEDDING_API_KEY 或 API_KEY）", {
+      hint: [
+        "在 Workers 控制台 Settings → Variables and Secrets 里添加 Secret 类型的 API_KEY（生成用）或 EMBEDDING_API_KEY（嵌入用）",
+        "如果生成和嵌入用的是两个平台，就再填 EMBEDDING_API_URL（向量接口根地址）与 EMBEDDING_API_KEY",
+        "改完点 Retry deployment 重新部署，然后刷新本页",
       ],
     });
   }
   let payload;
   try {
-    payload = await callApi(env, "/embeddings", { model, input: texts });
+    payload = await callApi(env, "/embeddings", { model, input: texts }, target);
   } catch (error) {
     const reason = String(error?.providerReason ?? error?.message ?? error);
+    if (error?.noChannel) throw await modelMissingError(env, "embedding", model, reason, "noChannel");
     if (MODEL_MISSING.test(reason)) throw await modelMissingError(env, "embedding", model, reason);
     throw error;
   }

@@ -7,7 +7,7 @@ import { deleteVectors, indexDocument, searchChunkIds } from "./lib/rag.js";
 import { extractTerms, keywordTerms, overlapScore, rankCandidates, stripOverlap } from "./lib/rank.js";
 import { generateAnswer } from "./lib/answer.js";
 import { initialize, continueReembed, provisionStatus } from "./lib/setup.js";
-import { apiHost, isConfigured } from "./lib/llm.js";
+import { apiHost, embeddingApiHost, embeddingProvider, isConfigured } from "./lib/llm.js";
 import { withDefaults } from "./lib/config.js";
 
 const TOP_K_LIMIT = 20;
@@ -75,6 +75,8 @@ async function status(env) {
     config: {
       embedding_model: env.EMBEDDING_MODEL,
       embedding_dimensions: Number(env.EMBEDDING_DIMENSIONS),
+      embedding_api_host: embeddingApiHost(env),
+      embedding_provider: embeddingProvider(env),
       chat_model: env.CHAT_MODEL,
       api_host: apiHost(env),
       index_name: env.INDEX_NAME,

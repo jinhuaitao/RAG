@@ -6,7 +6,7 @@ import { cleanText } from "../src/lib/clean.js";
 import { encodeVector } from "../src/lib/cfapi.js";
 import { assertPublicUrl, htmlToText } from "../src/lib/grab.js";
 import { generateAnswer } from "../src/lib/answer.js";
-import { apiBase, chatCompletion, embeddings, isConfigured } from "../src/lib/llm.js";
+import { apiBase, chatCompletion, embeddings, embeddingProvider, isConfigured } from "../src/lib/llm.js";
 import { combinedScore, extractTerms, keywordSql, keywordTerms, likePattern, lexicalScore, overlapScore, rankCandidates, stripOverlap } from "../src/lib/rank.js";
 import { chunkInsertStatements, groupStatements } from "../src/lib/store.js";
 import { DEFAULTS, withDefaults } from "../src/lib/config.js";
@@ -737,6 +737,198 @@ test("第三方接口：嵌入接口的普通 400 不多发模型清单请求", 
       assert.ok(thrown, "应当报错");
       assert.ok(!urls.some((url) => url.endsWith("/models")), urls.join(" "));
       assert.ok(/上游服务异常|拒绝了这次请求/.test(String(thrown.message)), thrown?.message);
+    }
+  );
+});
+
+test("第三方接口：嵌入可以单独走另一个平台", async () => {
+  const urls = [];
+  await withFetch(
+    async (url, options) => {
+      urls.push(url);
+      if (url.endsWith("/embeddings")) {
+        const body = JSON.parse(options.body);
+        assert.equal(body.model, "BAAI/bge-m3");
+        return jsonResponse({ data: [{ index: 0, embedding: [0.1, 0.2] }] });
+      }
+      return jsonResponse({ data: [{ id: "BAAI/bge-m3" }] });
+    },
+    async () => {
+      const env = {
+        API_URL: "https://chat.example.com/v1",
+        API_KEY: "sk-chat",
+        EMBEDDING_API_URL: "https://embed.example.com/v1",
+        EMBEDDING_API_KEY: "sk-embed",
+        EMBEDDING_MODEL: "BAAI/bge-m3",
+      };
+      const vectors = await embeddings(env, ["测试"]);
+      assert.equal(vectors.length, 1);
+      assert.ok(urls.includes("https://embed.example.com/v1/embeddings"), urls.join(" "));
+      assert.ok(!urls.includes("https://chat.example.com/v1/embeddings"), urls.join(" "));
+    }
+  );
+});
+
+test("第三方接口：平台只有对话模型时，明说入库做不了并指向单独的嵌入平台", async () => {
+  await withFetch(
+    async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "DeepSeek-V4-Flash(AMD)" }, { id: "Glm-5.3-Flash" }] });
+      }
+      return jsonResponse({ error: { message: "所有渠道均失败: AMD [Key1/1]: HTTP 400 Embedding model not found: DeepSeek-V4-Flash" } }, 400);
+    },
+    async () => {
+      let thrown;
+      try {
+        await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "DeepSeek-V4-Flash" }, ["测试"]);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      const hint = (thrown?.details?.hint ?? []).join(" | ");
+      assert.ok(/一个向量模型都没有/.test(hint), hint);
+      assert.ok(/EMBEDDING_API_URL/.test(hint), hint);
+    }
+  );
+});
+
+test("第三方接口：模型 ID 不在平台名单里时，列出平台上登记的完整名字", async () => {
+  await withFetch(
+    async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "DeepSeek-V4-Flash(AMD)" }, { id: "Glm-5.3-Flash" }] });
+      }
+      return jsonResponse({ error: { message: "没有可用渠道支持模型 DeepSeek-V4-Flash", code: "no_channel" } }, 503);
+    },
+    async () => {
+      let thrown;
+      try {
+        await chatCompletion({ ...LLM_ENV, CHAT_MODEL: "DeepSeek-V4-Flash" }, { messages: [{ role: "user", content: "hi" }] });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.ok(/可用渠道/.test(thrown.message), thrown?.message);
+      const hint = (thrown?.details?.hint ?? []).join(" | ");
+      assert.ok(/DeepSeek-V4-Flash\(AMD\)/.test(hint), hint);
+      assert.ok(!/上游服务异常/.test(hint), hint);
+    }
+  );
+});
+
+test("嵌入提供方：没写 EMBEDDING_PROVIDER 时按模型名判断", () => {
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3" }), "workers-ai", "@cf/ 开头是 Workers AI 的模型");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3" }), "third-party");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "BAAI/bge-m3", EMBEDDING_PROVIDER: "workers-ai" }), "workers-ai");
+  assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3", EMBEDDING_PROVIDER: "third-party" }), "third-party");
+});
+
+test("Workers AI：模型 ID 带 @cf/ 前缀时走 Cloudflare 自己的向量接口", async () => {
+  const urls = [];
+  const vectors = await withFetch(
+    async (url, options) => {
+      urls.push(url);
+      assert.equal(options.headers.authorization, "Bearer cf-token");
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body.text, ["退货政策"]);
+      return jsonResponse({ success: true, result: { data: [[0.1, 0.2, 0.3]], shape: [1, 3] } });
+    },
+    () =>
+      embeddings(
+        { CLOUDFLARE_ACCOUNT_ID: "acct-1", CLOUDFLARE_API_TOKEN: "cf-token", EMBEDDING_MODEL: "@cf/baai/bge-m3" },
+        ["退货政策"]
+      )
+  );
+  assert.deepEqual(vectors, [[0.1, 0.2, 0.3]]);
+  assert.equal(urls.length, 1, urls.join(" "));
+  assert.equal(urls[0], "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/baai/bge-m3", urls[0]);
+});
+
+test("Workers AI：模型 ID 写成 BAAI/bge-m3 时补成平台上的完整名字", async () => {
+  let requested = "";
+  await withFetch(
+    async (url) => {
+      requested = url;
+      return jsonResponse({ success: true, result: { data: [[0.1]], shape: [1, 1] } });
+    },
+    () =>
+      embeddings(
+        {
+          CLOUDFLARE_ACCOUNT_ID: "acct-1",
+          CLOUDFLARE_API_TOKEN: "cf-token",
+          EMBEDDING_MODEL: "BAAI/bge-m3",
+          EMBEDDING_PROVIDER: "workers-ai",
+        },
+        ["测试"]
+      )
+  );
+  assert.ok(requested.endsWith("/ai/run/@cf/baai/bge-m3"), requested);
+});
+
+test("Workers AI：Token 缺权限时点名要加 Workers AI: Read", async () => {
+  await withFetch(
+    async () => jsonResponse({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }, 403),
+    async () => {
+      let thrown;
+      try {
+        await embeddings(
+          { CLOUDFLARE_ACCOUNT_ID: "acct-1", CLOUDFLARE_API_TOKEN: "bad", EMBEDDING_MODEL: "@cf/baai/bge-m3" },
+          ["测试"]
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      const hint = (thrown?.details?.hint ?? []).join(" | ");
+      assert.ok(/Workers AI: Read/.test(hint), hint);
+    }
+  );
+});
+
+test("Workers AI：超长文本切开分别嵌入再取平均，不被 token 上限截断", async () => {
+  const sent = [];
+  const vectors = await withFetch(
+    async (url, options) => {
+      const body = JSON.parse(options.body);
+      sent.push(...body.text);
+      return jsonResponse({ success: true, result: { data: body.text.map(() => [1, 0]), shape: [body.text.length, 2] } });
+    },
+    () =>
+      embeddings(
+        {
+          CLOUDFLARE_ACCOUNT_ID: "acct-1",
+          CLOUDFLARE_API_TOKEN: "cf-token",
+          EMBEDDING_MODEL: "@cf/baai/bge-m3",
+          EMBEDDING_MAX_CHARS: "10",
+        },
+        ["一二三四五六七八九十十一"]
+      )
+  );
+  assert.equal(sent.length, 2, `超长文本要切成多段，实际 ${sent.length}`);
+  assert.ok(sent.every((piece) => piece.length <= 11), JSON.stringify(sent));
+  assert.deepEqual(vectors[0], [1, 0], "同一段的多块向量取平均");
+});
+
+test("第三方接口：嵌入报「没有可用渠道」时，点名 Workers AI 这条路", async () => {
+  await withFetch(
+    async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "DeepSeek-V4-Flash(AMD)" }, { id: "Glm-5.3-Flash" }] });
+      }
+      return jsonResponse({ error: { message: "没有可用渠道支持模型 BAAI/bge-m3", code: "no_channel" } }, 503);
+    },
+    async () => {
+      let thrown;
+      try {
+        await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "BAAI/bge-m3" }, ["测试"]);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, "应当报错");
+      assert.ok(/可用渠道/.test(thrown.message), thrown?.message);
+      const hint = (thrown?.details?.hint ?? []).join(" | ");
+      assert.ok(/@cf\/baai\/bge-m3/.test(hint), hint);
+      assert.ok(/Workers AI/.test(hint), hint);
     }
   );
 });

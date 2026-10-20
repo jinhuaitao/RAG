@@ -31,6 +31,8 @@
 - [本地跑起来](#本地跑起来)
 - [HTTP API](#http-api)
 - [配置项](#配置项)
+- [嵌入与生成可以走两个平台](#嵌入与生成可以走两个平台)
+- [嵌入改走 Workers AI](#嵌入改走-workers-ai)
 - [换模型 / 换维度](#换模型--换维度)
 - [上游接口挑形状：自动降级重试](#上游接口挑形状自动降级重试)
 - [常见问题](#常见问题)
@@ -83,6 +85,7 @@ https://rag-kb.<你的账号子域>.workers.dev
 | `Account · Workers Scripts: Edit` | Git 集成部署 Worker |
 | `Account · Workers D1: Edit` | 建库、建表、读写文档 |
 | `Account · Workers Vector Store: Edit` | 建索引、写入与检索向量 |
+| `Account · Workers AI: Read` | 只有嵌入改走 Workers AI 时才需要（见[嵌入改走 Workers AI](#嵌入改走-workers-ai)） |
 
 然后到 **Workers & Pages → rag-kb → Settings → Variables and Secrets → Variables**，添加下面几项：
 
@@ -97,6 +100,8 @@ https://rag-kb.<你的账号子域>.workers.dev
 `API_KEY` 必须选 **Secret** 类型（Text 会被任何拿到部署权限的人读到）；`API_URL` 用 Text 即可，它不是机密。
 
 `API_URL` 只填根地址，不要带 `/chat/completions` 之类的完整端点——直接粘完整端点也能用，Worker 会自动截掉。`EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` / `CHAT_MODEL` 三个值在 `src/lib/config.js` 里给了 OpenAI 的默认值，换平台时在控制台加同名变量覆盖（换嵌入模型必须同时改维度，见[换模型 / 换维度](#换模型--换维度)）。
+
+模型 ID 要用平台上登记的**完整名字**：聚合站常给同一个模型挂不同渠道，名字里带后缀，例如 `DeepSeek-V4-Flash(AMD)`、`DeepSeek-V4-Pro(书生·端砚)`，少了后缀会得到「没有可用渠道支持模型 X」。拿不准就看一眼平台给了哪些：`curl <API_URL>/models -H 'authorization: Bearer <API_KEY>'`（页面报错时也会自动列出来）。另外要注意平台有没有**向量模型**——只提供对话模型的平台没法入库，见[嵌入与生成可以走两个平台](#嵌入与生成可以走两个平台)；不想再找一个嵌入平台的话，嵌入可以单独走 Cloudflare 自带的 Workers AI，见[嵌入改走 Workers AI](#嵌入改走-workers-ai)。
 
 改完如果状态未生效，去 **Deployments → 最新一次 → Retry deployment** 重跑一次即可。
 
@@ -259,6 +264,10 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 | --- | --- | --- |
 | `API_URL` | `https://api.openai.com/v1` | 第三方接口根地址。域名下没有版本段时会自动补 `/v1`；直接粘完整端点（`…/chat/completions`）也会被自动截掉 |
 | `API_KEY` | 无（Secret） | 第三方平台密钥。没配时问答与入库会返回 503 并给出配置指引 |
+| `EMBEDDING_API_URL` | 空 | 嵌入单独走另一个平台时填它的根地址（留空则嵌入与生成走同一个平台） |
+| `EMBEDDING_API_KEY` | 空 | 上面那个平台的密钥；留空则沿用 `API_KEY` |
+| `EMBEDDING_PROVIDER` | 空 | 嵌入提供方：`workers-ai` 或 `third-party`。留空按模型名判断（`@cf/` 开头=Workers AI） |
+| `EMBEDDING_MAX_CHARS` | `400` | 单次送进嵌入模型的字符上限。Workers AI 的 bge-m3 最长 512 token，超了会自动切块后取平均 |
 | `API_TIMEOUT_MS` | `60000` | 调用第三方接口的超时（5–300 秒） |
 | `API_KEY_HEADER` | `authorization` | 密钥放在哪个请求头。少数平台要 `x-api-key` 时改这里 |
 | `API_KEY_PREFIX` | `Bearer ` | 密钥前缀。平台要裸 Key（不带 `Bearer `）时改成空字符串 |
@@ -283,6 +292,42 @@ curl -s -X POST $BASE/api/ask -H "$AUTH" -H 'content-type: application/json' \
 除了上表的键，Worker 还需要三个 Secret：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`ADMIN_TOKEN`，见[第 3 步](#第-3-步配三个-secret-和模型接口)。
 
 想永久改默认值（比如把 `API_URL` 的默认地址换成你的平台）就改 `src/lib/config.js` 里的 `DEFAULTS` 再提交；只想调这一个 Worker，在控制台加同名变量即可，不用改代码。
+
+### 嵌入与生成可以走两个平台
+
+有些聚合站只提供对话模型、**一个向量模型都没有**（DeepSeek 这类本身就没有嵌入 API）。这种平台只能用来回答问题，入库还得另配一个能嵌入的：
+
+| 变量 | 填什么 |
+| --- | --- |
+| `API_URL` / `API_KEY` | 聊天平台（回答问题用） |
+| `EMBEDDING_API_URL` | 嵌入平台的根地址，例如 `https://api.siliconflow.cn/v1` |
+| `EMBEDDING_API_KEY` | 嵌入平台的密钥（**Secret**） |
+| `EMBEDDING_MODEL` | 嵌入平台的向量模型，例如 `BAAI/bge-m3` |
+| `EMBEDDING_DIMENSIONS` | 它的实际维度（bge-m3 = 1024） |
+
+不配 `EMBEDDING_API_URL` / `EMBEDDING_API_KEY` 时，嵌入照旧走 `API_URL` / `API_KEY`，行为不变。页面顶部的状态栏在两者不同的时候会把嵌入接口的地址也列出来。
+
+**模型 ID 要用平台上登记的完整名字。** 聚合站常给同一个模型挂不同渠道，名字里带后缀，例如 `DeepSeek-V4-Flash(AMD)`、`DeepSeek-V4-Pro(书生·端砚)`——少了后缀会得到「没有可用渠道支持模型 X」。报错里会直接列出平台 `/models` 的清单，照抄即可。
+
+### 嵌入改走 Workers AI
+
+不想再找一个能嵌入的第三方平台时，可以让**嵌入**单独走 Cloudflare 自带的 Workers AI：生成继续用你的第三方平台，入库走 Cloudflare 的向量模型。
+
+| 变量 | 填什么 |
+| --- | --- |
+| `API_URL` / `API_KEY` | 聊天平台（回答问题用，照旧） |
+| `EMBEDDING_MODEL` | `@cf/baai/bge-m3`（**1024 维**）。写成 `BAAI/bge-m3` 也会自动补成这个名字 |
+| `EMBEDDING_DIMENSIONS` | `1024` |
+| `EMBEDDING_PROVIDER` | 不用填：模型 ID 以 `@cf/` 开头就自动走 Workers AI |
+
+这样只需要一个额外准备：**给 `CLOUDFLARE_API_TOKEN` 加上 `Account · Workers AI: Read` 权限**（Cloudflare 控制台 → My Profile → API Tokens → 编辑这个 Token → Permissions）。不需要额外的模型密钥，也不用在 `wrangler.jsonc` 里声明 AI 绑定。
+
+几点说明：
+
+- Workers AI 走的是 Cloudflare 的 REST 接口，复用已有的 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`；
+- bge-m3 最长 512 token，超出的片段会自动切开、分别嵌入后取平均，不会把尾巴丢掉；
+- 换了嵌入模型维度要同步改 `EMBEDDING_DIMENSIONS`，再点一次**初始化资源**按新维度重建索引（你账号里原本的 1024 维索引正好能直接用）；
+- 页面顶部状态栏会显示「嵌入 @cf/baai/bge-m3（1024 维 · Workers AI）」，一眼能看出嵌入走的是哪条路。
 
 ## 换模型 / 换维度
 
@@ -328,6 +373,18 @@ Worker 会按上游的报错内容自动换形状重试，顺序是：
 入库要的是**向量**，模型 ID 填成了聊天模型（DeepSeek / GPT / Claude 这类只能回答问题，不能做嵌入），或者这个平台上根本没有这个嵌入模型。报错里会直接列出平台上可用的嵌入模型（Worker 自己去 `/models` 拉的清单），照着换一个即可；`EMBEDDING_MODEL` 和 `CHAT_MODEL` 必须是两个不同的模型。
 
 换完记得同步改 `EMBEDDING_DIMENSIONS`（bge-m3 = 1024、bge-large-zh = 1024、text-embedding-3-small = 1536、Qwen3-Embedding-8B = 4096），然后点**初始化资源**按新维度重建索引。`/embeddings` 这个地址本身没错——嵌入本来就走它。
+
+**报错说「这个平台的清单里一个向量模型都没有」**
+这个平台只提供对话模型，入库没法在它上面做。生成继续用它，嵌入有两条路：控制台加 `EMBEDDING_API_URL`（嵌入平台根地址）与 `EMBEDDING_API_KEY`（**Secret**），再把 `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` 换成那个平台的向量模型与维度；或者把 `EMBEDDING_MODEL` 改成 `@cf/baai/bge-m3`，嵌入改走 Cloudflare 自带的 Workers AI。见[嵌入与生成可以走两个平台](#嵌入与生成可以走两个平台)和[嵌入改走 Workers AI](#嵌入改走-workers-ai)。
+
+**报错说「没有可用渠道支持模型 X」**
+模型 ID 不在平台登记的名单里。聚合站常给同一个模型挂不同渠道，名字里带后缀（例如 `DeepSeek-V4-Flash(AMD)`、`DeepSeek-V4-Pro(书生·端砚)`），少了后缀就没有渠道。报错里会列出平台 `/models` 的完整清单，照抄一个即可。
+
+**入库报「没有可用渠道支持模型 BAAI/bge-m3」（HTTP 503）**
+`/embeddings` 这个地址本身没错，错的是模型：这个平台上没有这个**向量**模型（它的对话渠道挂着 bge-m3，但没人提供向量接口）。两条出路：换一个平台上确实有的向量模型，或把 `EMBEDDING_MODEL` 改成 `@cf/baai/bge-m3` 让嵌入改走 Workers AI。两种都要同步改 `EMBEDDING_DIMENSIONS`（bge-m3 = 1024），再点一次**初始化资源**。
+
+**报错说「Workers AI 调用失败（HTTP 403）」**
+`CLOUDFLARE_API_TOKEN` 缺 Workers AI 权限。Cloudflare 控制台 → My Profile → API Tokens → 编辑这个 Token → Permissions 加一项 `Account · Workers AI: Read`，保存后 Retry deployment。
 
 **页面提示「还差一步：配置模型接口」/ 状态里 `llm_ready` 为 false**
 `API_URL` 或 `API_KEY` 没配好。到 **Settings → Variables and Secrets** 里加 `API_URL`（Text）和 `API_KEY`（**Secret**），保存后 Retry deployment，再点页面上的「重新检查」。`API_KEY` 没配时问答与入库都会返回 503，并附带上面这三步的操作提示。
@@ -407,6 +464,7 @@ src/lib/cfapi.js         Cloudflare REST API 封装：D1 建库/查询、Vectori
 src/lib/setup.js         「初始化资源」的幂等逻辑与 provisioning 状态探测
 src/lib/store.js         通过 REST 读写 D1（切片原文按向量 id 回查）
 src/lib/llm.js           第三方 OpenAI 兼容接口：地址归一化、嵌入/生成调用、错误翻成中文提示
+src/lib/workersai.js     Workers AI 向量模型：走 Cloudflare REST 接口，长文本切块后取平均
 src/lib/rag.js           嵌入、批量 upsert、向量检索、维度校验
 src/lib/rank.js          检索词抽取、关键词召回 SQL、两路分数合并重排、重叠去重
 src/lib/chunk.js         中英混合文本切片（段落 → 句子 → 重叠打包）与标题层级识别

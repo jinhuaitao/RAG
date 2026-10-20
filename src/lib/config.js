@@ -6,6 +6,13 @@ export const DEFAULTS = {
   API_KEY_HEADER: "authorization",
   API_KEY_PREFIX: "Bearer ",
   API_TIMEOUT_MS: "60000",
+  // 嵌入可以单独走另一个平台（有些聚合站只提供对话模型，没有向量模型）
+  EMBEDDING_API_URL: "",
+  EMBEDDING_API_KEY: "",
+  // 嵌入提供方：空=按模型名判断（@cf/ 开头走 Workers AI），也可写 third-party / workers-ai
+  EMBEDDING_PROVIDER: "",
+  // 单次送进嵌入模型的字符数上限：Workers AI 的 bge-m3 最长 512 token，超了要先切块
+  EMBEDDING_MAX_CHARS: "400",
   CF_API_BASE: "https://api.cloudflare.com/client/v4",
   DB_NAME: "rag-kb-db",
   INDEX_NAME: "rag-kb-index",

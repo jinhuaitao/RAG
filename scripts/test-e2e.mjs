@@ -245,6 +245,34 @@ test("端到端：模型维度与配置不符时，删索引之前就拦下来",
   assert.equal(index.body.result.config.dimensions, 1024, "索引应当原样保留");
 });
 
+test("端到端：嵌入走 Workers AI 时，入库与检索照常", async () => {
+  stopMock();
+  await startMock({ EMBEDDING_PROVIDER: "workers-ai", EMBEDDING_MODEL: "@cf/baai/bge-m3" });
+
+  const status = await app("/api/status");
+  assert.equal(status.body.config.embedding_provider, "workers-ai", JSON.stringify(status.body.config));
+
+  const setup = await app("/api/admin/setup", { method: "POST" });
+  assert.equal(setup.status, 200, JSON.stringify(setup.body));
+
+  const ingest = await app("/api/documents", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "退货政策", text: POLICY }),
+  });
+  assert.equal(ingest.status, 201, JSON.stringify(ingest.body));
+  assert.ok(ingest.body.chunkCount >= 1, JSON.stringify(ingest.body));
+
+  const ask = await app("/api/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question: "退货申请几天内提交？" }),
+  });
+  assert.equal(ask.status, 200, JSON.stringify(ask.body));
+  assert.ok(ask.body.sources?.length, JSON.stringify(ask.body));
+  assert.ok(!ask.body.noContext, JSON.stringify(ask.body));
+});
+
 let failed = 0;
 try {
   for (const [name, fn] of cases) {
