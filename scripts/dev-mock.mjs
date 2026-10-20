@@ -1,6 +1,7 @@
 // 离线冒烟/预览：起一个假的 Cloudflare REST API（D1 + Vectorize v2 端点）和一个假的第三方
 // OpenAI 兼容接口（/v1/embeddings 与 /v1/chat/completions），
 // Worker 代码走的是真实 REST 路径，所以不登录 Cloudflare 也能端到端验证「初始化 → 入库 → 检索 → 问答 → 删除」。
+// Workers AI 的嵌入走 Worker 上的 AI 绑定，这里用 env.AI 模拟同一个接口。
 // 用法：node scripts/dev-mock.mjs [port]
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -163,19 +164,6 @@ async function handleApi(req, res) {
     return send(401, envelope(null, [{ code: 10000, message: "Authentication error" }]));
   }
 
-  // Workers AI：POST /accounts/{id}/ai/run/{model}，返回 { data: [[…]], shape: [n, dim] }
-  const aiMatch = path.match(/^\/ai\/run\/(.+)$/);
-  if (aiMatch) {
-    const model = decodeURIComponent(aiMatch[1]);
-    if (!/bge|embed/i.test(model)) {
-      return send(400, envelope(null, [{ code: 7003, message: `Could not process request: model ${model} not found` }]));
-    }
-    const payload = JSON.parse(body || "{}");
-    const input = Array.isArray(payload.text) ? payload.text : [payload.text];
-    const data = input.map((text) => fakeEmbedding(text));
-    return send(200, envelope({ data, shape: [data.length, DIMENSIONS] }));
-  }
-
   // D1：列库 / 建库
   if (path === "/d1/database" && req.method === "GET") {
     return send(200, envelope([...databases].map(([uuid, database]) => ({ uuid, name: database.name }))));
@@ -323,6 +311,17 @@ const env = {
   CF_API_BASE: `http://127.0.0.1:${API_PORT}/client/v4`,
   CLOUDFLARE_API_TOKEN: API_TOKEN,
   CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+  // 假的 AI 绑定：对应 wrangler.jsonc 里的 ai.binding，run(model, { text }) 返回 { data: [[…]], shape: [n, dim] }
+  AI: {
+    run: async (model, options) => {
+      if (!/bge|embed/i.test(String(model))) {
+        throw new Error(`7003 Could not process request: model ${model} not found`);
+      }
+      const input = Array.isArray(options?.text) ? options.text : [options?.text];
+      const data = input.map((text) => fakeEmbedding(text));
+      return { data, shape: [data.length, DIMENSIONS] };
+    },
+  },
   DB_NAME: "rag-kb-db",
   INDEX_NAME: "rag-kb-index",
   API_URL: `http://127.0.0.1:${API_PORT}/v1`,

@@ -206,9 +206,10 @@ function renderBanners() {
   if (!status.llm_ready) {
     banner("还差一步：配置模型接口", "", {
       parts: [
-        "本服务不使用 Cloudflare Workers AI，嵌入与生成都走你自己的第三方模型接口。请在 Workers 控制台 Settings → Variables and Secrets 里添加：",
+        "回答问题走你自己的第三方模型接口，请在 Workers 控制台 Settings → Variables and Secrets 里添加：",
         "变量 API_URL —— 第三方平台的接口根地址，例如 https://api.openai.com/v1",
         "Secret API_KEY —— 第三方平台的密钥",
+        "入库用的嵌入可以用同一个平台；想改用 Cloudflare 自带的 Workers AI，就把 EMBEDDING_MODEL 填 @cf/baai/bge-m3、EMBEDDING_DIMENSIONS 填 1024，不用密钥。",
         "改完点 Retry deployment 重新部署，再回来点「重新检查」。",
       ],
       action: { label: "重新检查", primary: false, onClick: () => loadStatus() },

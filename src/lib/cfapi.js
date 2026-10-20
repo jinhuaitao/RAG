@@ -30,7 +30,6 @@ export function credentials(env) {
       hint: [
         "在 Workers 控制台 Settings → Variables and Secrets 里添加两个 Secret：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID",
         "Token 权限需要：Workers Scripts Edit、Workers D1 Edit、Workers Vector Store Edit",
-        "嵌入走 Workers AI 时还要加一项 Workers AI: Read（Account 级别）",
       ],
     });
   }

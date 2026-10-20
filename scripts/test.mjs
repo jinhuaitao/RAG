@@ -687,6 +687,11 @@ test("部署配置：不声明 vars 且打开 keep_vars，控制台的变量才�
   assert.equal(config.assets?.binding, "ASSETS", "Assets 绑定要留着");
 });
 
+test("部署配置：AI 绑定声明在 wrangler.jsonc 里，每次部署都自动带上", () => {
+  const config = parseJsonc(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.ai?.binding, "AI", "AI 绑定要声明在配置里：控制台手动加的绑定会被重新部署冲掉");
+});
+
 test("第三方接口：嵌入模型不存在时，点名要改的变量并列出平台上能用的嵌入模型", async () => {
   const urls = [];
   const env = { ...LLM_ENV, EMBEDDING_MODEL: "DeepSeek-V4-Flash", CHAT_MODEL: "DeepSeek-V4-Flash" };
@@ -823,86 +828,104 @@ test("嵌入提供方：没写 EMBEDDING_PROVIDER 时按模型名判断", () => 
   assert.equal(embeddingProvider({ EMBEDDING_MODEL: "@cf/baai/bge-m3", EMBEDDING_PROVIDER: "third-party" }), "third-party");
 });
 
-test("Workers AI：模型 ID 带 @cf/ 前缀时走 Cloudflare 自己的向量接口", async () => {
-  const urls = [];
-  const vectors = await withFetch(
-    async (url, options) => {
-      urls.push(url);
-      assert.equal(options.headers.authorization, "Bearer cf-token");
-      const body = JSON.parse(options.body);
-      assert.deepEqual(body.text, ["退货政策"]);
-      return jsonResponse({ success: true, result: { data: [[0.1, 0.2, 0.3]], shape: [1, 3] } });
+test("Workers AI：嵌入走 Worker 上的 AI 绑定，一个 HTTP 请求都不发", async () => {
+  const calls = [];
+  const env = {
+    ...LLM_ENV,
+    EMBEDDING_MODEL: "@cf/baai/bge-m3",
+    AI: {
+      run: async (model, options) => {
+        calls.push({ model, text: options.text });
+        return { data: [[0.1, 0.2, 0.3]], shape: [1, 3] };
+      },
     },
-    () =>
-      embeddings(
-        { CLOUDFLARE_ACCOUNT_ID: "acct-1", CLOUDFLARE_API_TOKEN: "cf-token", EMBEDDING_MODEL: "@cf/baai/bge-m3" },
-        ["退货政策"]
-      )
+  };
+  let fetches = 0;
+  const vectors = await withFetch(
+    async () => {
+      fetches += 1;
+      throw new Error("Workers AI 走绑定，不该发 HTTP 请求");
+    },
+    () => embeddings(env, ["退货政策"])
   );
   assert.deepEqual(vectors, [[0.1, 0.2, 0.3]]);
-  assert.equal(urls.length, 1, urls.join(" "));
-  assert.equal(urls[0], "https://api.cloudflare.com/client/v4/accounts/acct-1/ai/run/@cf/baai/bge-m3", urls[0]);
+  assert.equal(fetches, 0, "绑定调用不该走 fetch");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "@cf/baai/bge-m3");
+  assert.deepEqual(calls[0].text, ["退货政策"]);
 });
 
 test("Workers AI：模型 ID 写成 BAAI/bge-m3 时补成平台上的完整名字", async () => {
   let requested = "";
-  await withFetch(
-    async (url) => {
-      requested = url;
-      return jsonResponse({ success: true, result: { data: [[0.1]], shape: [1, 1] } });
-    },
-    () =>
-      embeddings(
-        {
-          CLOUDFLARE_ACCOUNT_ID: "acct-1",
-          CLOUDFLARE_API_TOKEN: "cf-token",
-          EMBEDDING_MODEL: "BAAI/bge-m3",
-          EMBEDDING_PROVIDER: "workers-ai",
+  await embeddings(
+    {
+      ...LLM_ENV,
+      EMBEDDING_MODEL: "BAAI/bge-m3",
+      EMBEDDING_PROVIDER: "workers-ai",
+      AI: {
+        run: async (model) => {
+          requested = model;
+          return { data: [[0.1]], shape: [1, 1] };
         },
-        ["测试"]
-      )
+      },
+    },
+    ["测试"]
   );
-  assert.ok(requested.endsWith("/ai/run/@cf/baai/bge-m3"), requested);
+  assert.equal(requested, "@cf/baai/bge-m3");
 });
 
-test("Workers AI：Token 缺权限时点名要加 Workers AI: Read", async () => {
-  await withFetch(
-    async () => jsonResponse({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }, 403),
-    async () => {
-      let thrown;
-      try {
-        await embeddings(
-          { CLOUDFLARE_ACCOUNT_ID: "acct-1", CLOUDFLARE_API_TOKEN: "bad", EMBEDDING_MODEL: "@cf/baai/bge-m3" },
-          ["测试"]
-        );
-      } catch (error) {
-        thrown = error;
-      }
-      assert.ok(thrown, "应当报错");
-      const hint = (thrown?.details?.hint ?? []).join(" | ");
-      assert.ok(/Workers AI: Read/.test(hint), hint);
-    }
-  );
+test("Workers AI：模型不存在时列出可用的向量模型并点名要改哪个变量", async () => {
+  const env = {
+    ...LLM_ENV,
+    EMBEDDING_MODEL: "@cf/baai/bge-nonexistent",
+    AI: {
+      run: async () => {
+        throw new Error("7003 Could not process request: model @cf/baai/bge-nonexistent not found");
+      },
+    },
+  };
+  let thrown;
+  try {
+    await embeddings(env, ["测试"]);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown, "应当报错");
+  const hint = (thrown?.details?.hint ?? []).join(" | ");
+  assert.ok(/@cf\/baai\/bge-m3/.test(hint), hint);
+  assert.ok(/EMBEDDING_MODEL/.test(hint), hint);
+  assert.ok(/EMBEDDING_DIMENSIONS/.test(hint), hint);
+});
+
+test("Workers AI：Worker 上没有 AI 绑定时点名要改 wrangler.jsonc", async () => {
+  let thrown;
+  try {
+    await embeddings({ ...LLM_ENV, EMBEDDING_MODEL: "@cf/baai/bge-m3" }, ["测试"]);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown, "应当报错");
+  assert.ok(/没有绑定/.test(thrown.message), thrown?.message);
+  const hint = (thrown?.details?.hint ?? []).join(" | ");
+  assert.ok(/wrangler\.jsonc/.test(hint), hint);
+  assert.ok(/Retry deployment/.test(hint), hint);
 });
 
 test("Workers AI：超长文本切开分别嵌入再取平均，不被 token 上限截断", async () => {
   const sent = [];
-  const vectors = await withFetch(
-    async (url, options) => {
-      const body = JSON.parse(options.body);
-      sent.push(...body.text);
-      return jsonResponse({ success: true, result: { data: body.text.map(() => [1, 0]), shape: [body.text.length, 2] } });
-    },
-    () =>
-      embeddings(
-        {
-          CLOUDFLARE_ACCOUNT_ID: "acct-1",
-          CLOUDFLARE_API_TOKEN: "cf-token",
-          EMBEDDING_MODEL: "@cf/baai/bge-m3",
-          EMBEDDING_MAX_CHARS: "10",
+  const vectors = await embeddings(
+    {
+      ...LLM_ENV,
+      EMBEDDING_MODEL: "@cf/baai/bge-m3",
+      EMBEDDING_MAX_CHARS: "10",
+      AI: {
+        run: async (model, options) => {
+          sent.push(...options.text);
+          return { data: options.text.map(() => [1, 0]), shape: [options.text.length, 2] };
         },
-        ["一二三四五六七八九十十一"]
-      )
+      },
+    },
+    ["一二三四五六七八九十十一"]
   );
   assert.equal(sent.length, 2, `超长文本要切成多段，实际 ${sent.length}`);
   assert.ok(sent.every((piece) => piece.length <= 11), JSON.stringify(sent));

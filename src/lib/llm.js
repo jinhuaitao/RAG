@@ -1,9 +1,10 @@
 import { HttpError } from "./http.js";
-import { normalizeModel as normalizeWorkersAiModel, workersAiEmbeddings } from "./workersai.js";
+import { workersAiEmbeddings } from "./workersai.js";
 
-// 第三方 OpenAI 兼容接口：嵌入与生成都走这里，Worker 不再依赖 Workers AI 绑定。
+// 第三方 OpenAI 兼容接口：生成走这里，嵌入默认也走这里。
 // 约定：API_URL 填到 /v1 这一层（如 https://api.openai.com/v1），API_KEY 作为 Secret 配置。
 // 兼容面：OpenAI、DeepSeek、硅基流动、通义千问 compatible-mode、OneAPI/NewAPI 聚合站、Ollama 等。
+// 例外：EMBEDDING_MODEL 填 @cf/ 开头的模型时，嵌入改走 Worker 上的 AI 绑定（见 workersai.js）。
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 300_000;
@@ -52,13 +53,8 @@ export function embeddingProvider(env) {
 
 // 有些聚合站只提供对话模型，没有向量模型；这时可以单独指定做嵌入的平台
 export function embeddingApiHost(env) {
-  if (embeddingProvider(env) === "workers-ai") {
-    try {
-      return new URL(String(env.CF_API_BASE || "https://api.cloudflare.com/client/v4")).host;
-    } catch {
-      return "api.cloudflare.com";
-    }
-  }
+  // Workers AI 走的是 Worker 上的 AI 绑定，没有对外的接口地址
+  if (embeddingProvider(env) === "workers-ai") return "";
   const url = String(env.EMBEDDING_API_URL || "").trim();
   if (!url) return apiHost(env);
   try {
@@ -541,7 +537,7 @@ export async function embeddings(env, texts) {
       ],
     });
   }
-  // Workers AI 是 Cloudflare 自家的向量模型，走 Cloudflare 的 REST API，不需要额外的模型密钥
+  // Workers AI 是 Cloudflare 自家的向量模型，走 Worker 上的 AI 绑定，不需要额外的模型密钥
   if (embeddingProvider(env) === "workers-ai") return workersAiEmbeddings(env, texts);
   const target = embeddingTarget(env);
   if (!target.key) {

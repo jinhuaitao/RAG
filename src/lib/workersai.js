@@ -1,7 +1,6 @@
-// Workers AI 嵌入：走 Cloudflare 自己的 REST API，复用已有的 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID。
-// 不需要额外的模型密钥，也不用在 wrangler.jsonc 里声明 AI 绑定——控制台加的绑定会被重新部署冲掉。
+// Workers AI 嵌入：走 Worker 上的 AI 绑定（wrangler.jsonc 里声明，随每次部署自动生效）。
+// 不需要额外的模型密钥，也不需要给 API Token 加 Workers AI 权限。
 import { HttpError } from "./http.js";
-import { credentials } from "./cfapi.js";
 
 // Workers AI 的模型 ID 一律带 @cf/ 前缀，用户习惯填的 BAAI/bge-m3 要补上
 const ALIASES = new Map([
@@ -30,14 +29,6 @@ export function normalizeModel(model) {
   return ALIASES.get(raw.toLowerCase()) ?? `@cf/${raw}`;
 }
 
-export function modelDimensions(model) {
-  const name = normalizeModel(model).toLowerCase();
-  if (name.includes("bge-m3") || name.includes("large-en")) return 1024;
-  if (name.includes("small-en")) return 384;
-  if (name.includes("base-en")) return 768;
-  return 0;
-}
-
 // bge-m3 最长 512 token，超了会被截断或直接报错。
 // 先把长片段切开分别嵌入再取平均：尾巴不丢，也不撞上限。
 export function splitText(text, maxChars) {
@@ -57,60 +48,40 @@ export function splitText(text, maxChars) {
   return pieces;
 }
 
-function encodeModel(model) {
-  return String(model).replace(/[^\w@\-./]/g, (character) => encodeURIComponent(character));
-}
-
-function apiError(status, detail, model) {
+// 绑定抛回来的只是一段文本，没有结构化的状态码，只能按内容认
+function aiError(error, model) {
+  const detail = String(error?.message ?? error);
   const hint = [];
-  if (status === 401 || status === 403 || /authoriz|permission|token|forbidden/i.test(detail)) {
-    hint.push("Cloudflare API Token 缺少 Workers AI 权限：控制台 → My Profile → API Tokens → 编辑这个 Token → Permissions 加一项 **Workers AI: Read**（Account 级别）");
-    hint.push(`确认 Worker 用的就是这个 Token（控制台变量 CLOUDFLARE_API_TOKEN）`);
-  } else if (status === 404 || /not found|unknown model|no such model|model_not_found/i.test(detail)) {
+  if (/not found|unknown model|no such model|7003/i.test(detail)) {
     hint.push(`Workers AI 上没有 ${model} 这个模型`);
     hint.push(`可用的向量模型：${KNOWN_MODELS.join("、")}`);
     hint.push(`改控制台变量 EMBEDDING_MODEL，并把 EMBEDDING_DIMENSIONS 改成对应维度`);
-  } else if (status === 429 || /rate limit|too many requests/i.test(detail)) {
-    hint.push("Workers AI 限流了，稍等几秒再试");
-  } else if (/too long|maximum context|token limit|length/i.test(detail)) {
+  } else if (/too long|maximum context|token limit|exceed/i.test(detail)) {
     hint.push("文本太长，被模型的 token 上限挡住了");
     hint.push("把控制台变量 CHUNK_MAX_CHARS 或 EMBEDDING_MAX_CHARS 调小（例如 600 → 400）");
+  } else if (/rate limit|too many requests|429/i.test(detail)) {
+    hint.push("Workers AI 限流了，稍等几秒再试");
   } else {
-    hint.push("确认账号已开通 Workers AI，且这个 Token 有 Workers AI: Read 权限");
+    hint.push(`确认账号已开通 Workers AI，且 EMBEDDING_MODEL 指向的是向量模型（例如 @cf/baai/bge-m3）`);
   }
-  return new HttpError(status === 429 ? 429 : 502, `Workers AI 调用失败（HTTP ${status}）：${detail}`, { hint });
+  return new HttpError(502, `Workers AI 调用失败：${detail}`, { hint });
 }
 
 async function run(env, model, texts) {
-  const { accountId, token, base } = credentials(env);
-  const url = `${base}/accounts/${accountId}/ai/run/${encodeModel(model)}`;
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ text: texts }),
-      signal: AbortSignal.timeout(30_000),
+  const binding = env.AI;
+  if (!binding || typeof binding.run !== "function") {
+    throw new HttpError(503, "这个 Worker 没有绑定 Workers AI（AI）", {
+      hint: [
+        "确认仓库根目录的 wrangler.jsonc 里有 \"ai\": { \"binding\": \"AI\" }",
+        "改完点 Deployments → 最新一次 → Retry deployment",
+      ],
     });
+  }
+  try {
+    return await binding.run(model, { text: texts });
   } catch (error) {
-    const reason = String(error?.message ?? error);
-    throw new HttpError(502, `无法访问 Workers AI（${url}）：${reason}`, {
-      hint: ["确认网络可达 api.cloudflare.com，且 API Token 没有过期"],
-    });
+    throw aiError(error, model);
   }
-
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = null;
-  }
-  if (!response.ok || payload?.success === false) {
-    const detail = payload?.errors?.[0]?.message || payload?.message || text.slice(0, 300) || response.statusText;
-    throw apiError(response.status, String(detail), model);
-  }
-  return payload?.result;
 }
 
 // result 形状：{ data: [[...], [...]], shape: [n, dim] }；单条输入时也可能只给一条向量

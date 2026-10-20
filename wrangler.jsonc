@@ -10,7 +10,12 @@
   },
   // 故意不声明 d1_databases / vectorize：D1 与 Vectorize 由 Worker 自己通过 Cloudflare REST API 创建和读写，
   // 所以控制台连上 GitHub 就能首次部署成功，不需要预先填任何资源 ID。
-  // 也没有 ai 绑定：嵌入与生成都走第三方 OpenAI 兼容接口（API_URL + API_KEY）。
+  //
+  // ai 绑定是自动的：声明在这里，每次部署都跟着代码一起走，控制台不用手动加绑定，
+  // 重新部署也不会把它冲掉。EMBEDDING_MODEL 填 @cf/ 开头的模型时，嵌入就走这个绑定。
+  "ai": {
+    "binding": "AI"
+  },
   //
   // 同样不声明 vars：环境变量以控制台为唯一来源。
   // keep_vars = true 让 wrangler deploy 保留控制台里已有的变量（Secret 本来就不会被部署删除），
